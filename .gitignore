@@ -1,0 +1,5 @@
+node_modules/
+/data/
+web/dist
+probe*.mjs
+.DS_Store
