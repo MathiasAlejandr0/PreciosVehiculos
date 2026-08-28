@@ -10,21 +10,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-
-const clp = new Intl.NumberFormat("es-CL", {
-  style: "currency",
-  currency: "CLP",
-  maximumFractionDigits: 0,
-});
-const num = new Intl.NumberFormat("es-CL");
-
-const TONE = {
-  emerald: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",
-  lime: "bg-lime-500/15 text-lime-300 ring-lime-500/30",
-  sky: "bg-sky-500/15 text-sky-300 ring-sky-500/30",
-  rose: "bg-rose-500/15 text-rose-300 ring-rose-500/30",
-  zinc: "bg-white/10 text-slate-300 ring-white/10",
-};
+import { filterListings } from "../../shared/vehicleReport.js";
+import SearchHome from "./SearchHome.jsx";
+import { Badge, Card, ChartTip, Field, Select, Stat, clp, num } from "./ui.jsx";
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -32,79 +20,11 @@ async function api(path, opts) {
   return res.json();
 }
 
-function Badge({ deal }) {
-  if (!deal) return null;
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${TONE[deal.tone] || TONE.zinc}`}>
-      {deal.label}
-    </span>
-  );
-}
-
-function Stat({ label, value, hint }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-      <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
-      <div className="mt-1 font-mono text-2xl font-semibold text-white">{value}</div>
-      {hint ? <div className="mt-1 text-xs text-slate-500">{hint}</div> : null}
-    </div>
-  );
-}
-
-function Card({ row, onOpen }) {
-  return (
-    <button
-      onClick={() => onOpen(row)}
-      className="group flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0d1826] text-left transition hover:border-amber-400/40 hover:bg-[#112033]"
-    >
-      <div className="relative h-36 bg-[#0a1320]">
-        {row.image_url ? (
-          <img src={row.image_url} alt="" className="h-full w-full object-cover opacity-90 group-hover:opacity-100" />
-        ) : (
-          <div className="flex h-full items-center justify-center text-slate-600">Sin foto</div>
-        )}
-        <div className="absolute left-2 top-2">
-          <Badge deal={row.deal} />
-        </div>
-        <div className="absolute bottom-2 right-2 rounded-md bg-black/60 px-2 py-0.5 text-[11px] uppercase tracking-wide text-slate-200">
-          {row.source}
-        </div>
-      </div>
-      <div className="flex flex-1 flex-col gap-1 p-3">
-        <div className="text-sm font-semibold text-white line-clamp-2">
-          {row.brand} {row.model} {row.year || ""}
-        </div>
-        <div className="text-xs text-slate-400 line-clamp-1">{row.version || row.title}</div>
-        <div className="mt-auto flex items-end justify-between pt-2">
-          <div className="font-mono text-lg font-semibold text-amber-300">{row.price ? clp.format(row.price) : "—"}</div>
-          <div className="text-right text-[11px] text-slate-400">
-            {row.mileage != null ? `${num.format(row.mileage)} km` : "km n/d"}
-            <div>{row.city || row.region || "Chile"}</div>
-          </div>
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function ChartTip({ active, payload, label, money }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="rounded-lg border border-white/10 bg-[#0d1826] px-3 py-2 text-xs text-white">
-      <div className="text-slate-400">{label}</div>
-      {payload.map((p) => (
-        <div key={p.dataKey}>
-          {p.name}: {money ? clp.format(p.value) : num.format(p.value)}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default function App() {
-  const [tab, setTab] = useState("mercado");
+  const [tab, setTab] = useState("buscar");
   const [stats, setStats] = useState(null);
   const [facets, setFacets] = useState({ brands: [], models: [], regions: [], cities: [], sources: [], categories: [] });
+  const [catalog, setCatalog] = useState(null);
   const [crawl, setCrawl] = useState(null);
   const [listings, setListings] = useState({ rows: [], total: 0, page: 1 });
   const [detail, setDetail] = useState(null);
@@ -124,8 +44,6 @@ export default function App() {
     sort: "recent",
     page: 1,
   });
-  const [tasarForm, setTasarForm] = useState({ brand: "Toyota", model: "", year: "2018", mileage: "80000" });
-  const [tasarRes, setTasarRes] = useState(null);
 
   const query = useMemo(() => {
     const p = new URLSearchParams();
@@ -162,9 +80,20 @@ export default function App() {
     setFacets(f);
   }, []);
 
+  useEffect(() => {
+    fetch("/data/listings.json")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => setCatalog(d.rows || []))
+      .catch(() => setCatalog([]));
+  }, []);
+
   const refreshListings = useCallback(async () => {
+    if (catalog?.length) {
+      setListings(filterListings(catalog, filters));
+      return;
+    }
     setListings(await api(`/api/listings?${query}`));
-  }, [query]);
+  }, [catalog, filters, query]);
 
   useEffect(() => {
     refreshStats().catch(() => {});
@@ -182,7 +111,13 @@ export default function App() {
   }, [crawl?.running, crawl?.inventory, refreshStats]);
 
   async function openDetail(row) {
-    setDetail(await api(`/api/listings/${encodeURIComponent(row.id)}`));
+    setDetail(row);
+    if (import.meta.env.PROD) return;
+    try {
+      setDetail(await api(`/api/listings/${encodeURIComponent(row.id)}`));
+    } catch {
+      /* nos quedamos con el aviso del catálogo */
+    }
   }
 
   async function runCrawl(mode) {
@@ -195,53 +130,47 @@ export default function App() {
     refreshCrawl();
   }
 
-  async function doTasar(e) {
-    e.preventDefault();
-    const p = new URLSearchParams(tasarForm);
-    setTasarRes(await api(`/api/tasar?${p}`));
-  }
-
   const modelsForBrand = facets.models.filter((m) => !filters.brand || m.brand === filters.brand);
 
   return (
     <div className="min-h-screen bg-[#08111c] text-slate-100">
       <header className="sticky top-0 z-20 border-b border-white/10 bg-[#08111c]/90 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3">
-          <div>
+          <button className="text-left" onClick={() => setTab("buscar")}>
             <div className="text-lg font-semibold tracking-tight">
               Precio<span className="text-amber-400">Auto</span>
             </div>
             <div className="text-xs text-slate-400">Inteligencia de mercado · vehículos usados Chile</div>
-          </div>
-          <nav className="flex gap-1 rounded-full bg-white/5 p-1">
+          </button>
+          <nav className="flex gap-1 overflow-x-auto rounded-full bg-white/5 p-1">
             {[
+              ["buscar", "Buscar"],
               ["mercado", "Mercado"],
               ["territorio", "Territorio"],
               ["avisos", "Avisos"],
-              ["tasador", "Tasador"],
             ].map(([id, label]) => (
               <button
                 key={id}
                 onClick={() => setTab(id)}
-                className={`rounded-full px-4 py-1.5 text-sm ${tab === id ? "bg-amber-400 text-black" : "text-slate-300 hover:text-white"}`}
+                className={`rounded-full px-4 py-1.5 text-sm whitespace-nowrap ${tab === id ? "bg-amber-400 text-black" : "text-slate-300 hover:text-white"}`}
               >
                 {label}
               </button>
             ))}
           </nav>
           <div className="flex items-center gap-2">
-              {import.meta.env.PROD ? (
-                <span className="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-slate-400">Datos del último snapshot</span>
-              ) : (
-                <>
-            <button onClick={() => runCrawl("quick")} className="rounded-lg border border-white/15 px-3 py-1.5 text-xs hover:border-amber-400/50">
-              Barrido rápido
-            </button>
-            <button onClick={() => runCrawl("standard")} className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-black">
-              Actualizar mercado
-            </button>
-                </>
-              )}
+            {import.meta.env.PROD ? (
+              <span className="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-slate-400">Datos del último snapshot</span>
+            ) : (
+              <>
+                <button onClick={() => runCrawl("quick")} className="rounded-lg border border-white/15 px-3 py-1.5 text-xs hover:border-amber-400/50">
+                  Barrido rápido
+                </button>
+                <button onClick={() => runCrawl("standard")} className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-black">
+                  Actualizar mercado
+                </button>
+              </>
+            )}
           </div>
         </div>
         {crawl ? (
@@ -259,6 +188,8 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6">
+        {tab === "buscar" ? <SearchHome facets={facets} catalog={catalog} onOpen={openDetail} /> : null}
+
         {tab === "mercado" && stats ? (
           <div className="space-y-6">
             <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -515,9 +446,11 @@ export default function App() {
                 <option value="year_desc">Más nuevos</option>
                 <option value="km_asc">Menor km</option>
               </select>
-              <a className="block text-center text-xs text-amber-300" href={`/api/export.csv?${query}`}>
-                Exportar CSV
-              </a>
+              {!import.meta.env.PROD ? (
+                <a className="block text-center text-xs text-amber-300" href={`/api/export.csv?${query}`}>
+                  Exportar CSV
+                </a>
+              ) : null}
             </aside>
             <section>
               <div className="mb-3 flex items-center justify-between text-sm text-slate-400">
@@ -537,43 +470,6 @@ export default function App() {
                 ))}
               </div>
             </section>
-          </div>
-        ) : null}
-
-        {tab === "tasador" ? (
-          <div className="mx-auto max-w-3xl space-y-6">
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
-              <h2 className="text-xl font-semibold">Tasador de mercado</h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Estima el precio justo a partir de avisos reales (percentiles P25 / mediana / P75), no de listas de concesionario.
-              </p>
-              <form onSubmit={doTasar} className="mt-4 grid gap-3 sm:grid-cols-2">
-                <Select label="Marca" value={tasarForm.brand} onChange={(v) => setTasarForm((f) => ({ ...f, brand: v }))} options={facets.brands} />
-                <Select
-                  label="Modelo"
-                  value={tasarForm.model}
-                  onChange={(v) => setTasarForm((f) => ({ ...f, model: v }))}
-                  options={facets.models.filter((m) => !tasarForm.brand || m.brand === tasarForm.brand)}
-                />
-                <Field label="Año" value={tasarForm.year} onChange={(v) => setTasarForm((f) => ({ ...f, year: v }))} />
-                <Field label="Kilometraje" value={tasarForm.mileage} onChange={(v) => setTasarForm((f) => ({ ...f, mileage: v }))} />
-                <button className="sm:col-span-2 rounded-xl bg-amber-400 py-2 text-sm font-semibold text-black">Tasar con datos reales</button>
-              </form>
-            </div>
-            {tasarRes ? (
-              <div className="grid gap-3 sm:grid-cols-3">
-                <Stat label="Muestra" value={num.format(tasarRes.sample || 0)} hint="Avisos comparables" />
-                <Stat label="Comprar cerca de" value={tasarRes.suggested_buy ? clp.format(tasarRes.suggested_buy) : "—"} hint="Zona P25" />
-                <Stat label="Publicar cerca de" value={tasarRes.suggested_list ? clp.format(tasarRes.suggested_list) : "—"} hint="Mediana + 3%" />
-                {tasarRes.stats ? (
-                  <div className="sm:col-span-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
-                    Banda de mercado: {clp.format(tasarRes.band.low)} — {clp.format(tasarRes.band.mid)} — {clp.format(tasarRes.band.high)}
-                  </div>
-                ) : (
-                  <div className="sm:col-span-3 text-sm text-slate-400">No hay suficientes avisos para esa combinación. Amplía el barrido o elige otra marca.</div>
-                )}
-              </div>
-            ) : null}
           </div>
         ) : null}
 
@@ -644,38 +540,5 @@ export default function App() {
         </div>
       ) : null}
     </div>
-  );
-}
-
-function Select({ label, value, onChange, options }) {
-  return (
-    <label className="block text-xs text-slate-400">
-      {label}
-      <select
-        className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        <option value="">Todas</option>
-        {options.map((o) => (
-          <option key={`${o.brand || ""}-${o.value}`} value={o.value}>
-            {o.value} ({o.n})
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function Field({ label, value, onChange }) {
-  return (
-    <label className="block text-xs text-slate-400">
-      {label}
-      <input
-        className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </label>
   );
 }

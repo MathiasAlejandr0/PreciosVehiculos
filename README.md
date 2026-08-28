@@ -48,9 +48,10 @@ El crawler no corre dentro de Vercel (timeouts y anti-bot). El dashboard en prod
 
 ## Qué muestra el panel
 
+La **portada es un buscador**: escribes marca, modelo y año (ej. `Toyota Yaris 2018`) y ves el informe de ese vehículo.
+
 - Precio más barato y más caro, con ciudad/región
-- Mediana, mínimo y máximo por región y ciudad
-- Curva de precio por año modelo (depreciación de mercado)
-- Serie diaria cuando hay varios barridos
-- Tasador P25 / mediana / P75
-- Filtros: marca, modelo, año, km, región, ciudad, portal
+- Banda de mercado (P25 / mediana / P75) y precio sugerido para comprar o publicar
+- Evolución por año modelo, por kilometraje y por región
+- Avisos reales ordenados de menor a mayor
+- Mercado general, territorio y listado completo en las otras pestañas

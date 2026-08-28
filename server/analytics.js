@@ -1,6 +1,7 @@
 import { db } from "./db.js";
 import { dealLabel } from "./lib/normalize.js";
 import { MARKETPLACES } from "./lib/geo.js";
+import { buildVehicleReport, parseVehicleQuery } from "../shared/vehicleReport.js";
 
 function percentile(sorted, p) {
   if (!sorted.length) return null;
@@ -434,6 +435,21 @@ export function tasar({ brand, model, year, mileage, category }) {
     suggested_list: sell,
     band: { low: stats.p25, mid: stats.p50, high: stats.p75 },
   };
+}
+
+export function getVehicleReport(query = {}) {
+  if (!db) return { sample: 0 };
+  const parsed = parseVehicleQuery(query.q || "", getFacets());
+  const filters = {
+    q: query.q || "",
+    brand: query.brand || parsed.brand,
+    model: query.model || parsed.model,
+    year: query.year || parsed.year,
+    mileage: query.mileage,
+    facets: getFacets(),
+  };
+  const rows = db.prepare(`SELECT * FROM listings WHERE is_active = 1 AND price > 0`).all();
+  return buildVehicleReport(rows, filters);
 }
 
 export function clearCompsCache() {

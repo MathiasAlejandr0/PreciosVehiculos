@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { db, countListings } from "./db.js";
-import { getOverview, getFacets, searchListings, getListing, tasar } from "./analytics.js";
+import { getOverview, getFacets, searchListings, getListing, tasar, getVehicleReport } from "./analytics.js";
 import { startCrawl, getCrawlState } from "./crawl.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -37,6 +37,10 @@ app.get("/api/listings/:id", (req, res) => {
 app.get("/api/tasar", (req, res) => {
   if (!req.query.brand) return res.status(400).json({ error: "Falta marca" });
   res.json(tasar(req.query));
+});
+
+app.get("/api/vehicle", (req, res) => {
+  res.json(getVehicleReport(req.query));
 });
 
 app.get("/api/crawl", (_req, res) => {
