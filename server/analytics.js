@@ -2,6 +2,8 @@ import { db } from "./db.js";
 import { dealLabel } from "./lib/normalize.js";
 import { MARKETPLACES } from "./lib/geo.js";
 import { buildVehicleReport, parseVehicleQuery } from "../shared/vehicleReport.js";
+import { attachPeerDeals, overpricedPicks, pickBestDeal, pickWorstDeal, uniqueOpportunities } from "../shared/intelligence.js";
+import { valueVehicle } from "../shared/valuation.js";
 
 function percentile(sorted, p) {
   if (!sorted.length) return null;
@@ -173,6 +175,7 @@ export function getEvolution() {
 }
 
 function pickListing(row) {
+  if (!row) return null;
   return {
     id: row.id,
     source: row.source,
@@ -194,13 +197,11 @@ export function getGeoReport() {
     SELECT id, source, url, title, brand, model, year, mileage, price, city, region
     FROM listings WHERE is_active = 1 AND price > 0
   `).all();
-
-  const cheapest = [...rows].sort((a, b) => a.price - b.price).slice(0, 12).map(pickListing);
-  const expensive = [...rows].sort((a, b) => b.price - a.price).slice(0, 12).map(pickListing);
+  const decorated = attachPeerDeals(rows);
 
   function group(keyFn) {
     const map = new Map();
-    for (const row of rows) {
+    for (const row of decorated) {
       const key = keyFn(row) || "Sin dato";
       if (!map.has(key)) map.set(key, []);
       map.get(key).push(row);
@@ -208,8 +209,6 @@ export function getGeoReport() {
     return [...map.entries()]
       .map(([name, list]) => {
         const prices = list.map((r) => r.price).sort((a, b) => a - b);
-        const min = list.reduce((a, b) => (a.price < b.price ? a : b));
-        const max = list.reduce((a, b) => (a.price > b.price ? a : b));
         const mid = prices[Math.floor(prices.length / 2)];
         return {
           name,
@@ -217,28 +216,30 @@ export function getGeoReport() {
           min_price: prices[0],
           max_price: prices[prices.length - 1],
           median: mid,
-          cheapest: pickListing(min),
-          expensive: pickListing(max),
+          cheapest: pickListing(pickBestDeal(list)),
+          expensive: pickListing(pickWorstDeal(list)),
         };
       })
       .sort((a, b) => b.n - a.n);
   }
 
   return {
-    cheapest,
-    expensive,
+    cheapest: uniqueOpportunities(rows, { limit: 12 }),
+    expensive: overpricedPicks(rows, { limit: 12 }),
     byRegion: group((r) => r.region).slice(0, 16),
     byCity: group((r) => r.city).slice(0, 24),
   };
 }
 
 export function getOverview() {
+  if (!db) return { totals: { listings: 0, livianos: 0 }, catalog: [] };
   const totals = db.prepare(`
     SELECT
       COUNT(*) AS listings,
+      SUM(CASE WHEN category IN ('auto','suv','camioneta','comercial') THEN 1 ELSE 0 END) AS livianos,
       COUNT(DISTINCT brand) AS brands,
       COUNT(DISTINCT source) AS sources,
-      ROUND(AVG(price)) AS avg_price,
+      ROUND(AVG(CASE WHEN category IN ('auto','suv','camioneta','comercial') THEN price END)) AS avg_price,
       MIN(price) AS min_price,
       MAX(price) AS max_price
     FROM listings WHERE is_active = 1 AND price > 0
@@ -315,6 +316,7 @@ export function getOverview() {
 }
 
 export function getFacets() {
+  if (!db) return { brands: [], models: [], regions: [], cities: [], sources: [], categories: [] };
   const brands = db.prepare(`
     SELECT brand AS value, COUNT(*) AS n FROM listings
     WHERE is_active = 1 AND brand IS NOT NULL GROUP BY brand ORDER BY n DESC LIMIT 80
@@ -343,6 +345,7 @@ export function getFacets() {
 }
 
 export function searchListings(filters = {}) {
+  if (!db) return { total: 0, page: 1, limit: 24, rows: [] };
   const page = Math.max(1, Number(filters.page) || 1);
   const limit = Math.min(60, Math.max(10, Number(filters.limit) || 24));
   const offset = (page - 1) * limit;
@@ -364,6 +367,7 @@ export function searchListings(filters = {}) {
 }
 
 export function getListing(id) {
+  if (!db) return null;
   const row = db.prepare("SELECT * FROM listings WHERE id = ?").get(id);
   if (!row) return null;
   const history = db
@@ -386,55 +390,34 @@ export function getListing(id) {
   return { ...decorate(row), history, comps, twins };
 }
 
-export function tasar({ brand, model, year, mileage, category }) {
-  const clauses = ["is_active = 1", "price > 0", "brand = @brand"];
-  const params = { brand };
-  if (category) {
-    clauses.push("category = @category");
-    params.category = category;
+function parseRules(raw) {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
   }
-  let rows = [];
-  if (model && year) {
-    rows = db
-      .prepare(
-        `SELECT price, mileage, year FROM listings
-         WHERE ${clauses.join(" AND ")} AND model = @model AND year BETWEEN @ymin AND @ymax`
-      )
-      .all({ ...params, model, ymin: Number(year) - 1, ymax: Number(year) + 1 });
-  }
-  if (rows.length < 5 && model) {
-    rows = db
-      .prepare(`SELECT price, mileage, year FROM listings WHERE ${clauses.join(" AND ")} AND model = @model`)
-      .all({ ...params, model });
-  }
-  if (rows.length < 5 && year) {
-    rows = db
-      .prepare(
-        `SELECT price, mileage, year FROM listings
-         WHERE ${clauses.join(" AND ")} AND year BETWEEN @ymin AND @ymax`
-      )
-      .all({ ...params, ymin: Number(year) - 2, ymax: Number(year) + 2 });
-  }
-  if (rows.length < 5) {
-    rows = db.prepare(`SELECT price, mileage, year FROM listings WHERE ${clauses.join(" AND ")}`).all(params);
-  }
-  let sample = rows;
-  if (mileage && rows.length >= 8) {
-    const km = Number(mileage);
-    const close = rows.filter((r) => r.mileage && Math.abs(r.mileage - km) <= Math.max(25000, km * 0.35));
-    if (close.length >= 5) sample = close;
-  }
-  const stats = summarize(sample.map((r) => r.price));
-  if (!stats) return { sample: 0 };
-  const buy = Math.round(stats.p25 * 0.98);
-  const sell = Math.round(stats.p50 * 1.03);
-  return {
-    sample: stats.n,
-    stats,
-    suggested_buy: buy,
-    suggested_list: sell,
-    band: { low: stats.p25, mid: stats.p50, high: stats.p75 },
-  };
+}
+
+export function tasar(query = {}) {
+  if (!db) return { sample: 0 };
+  const rows = db.prepare("SELECT * FROM listings WHERE is_active = 1 AND price > 0").all();
+  return valueVehicle(rows, {
+    brand: query.brand,
+    model: query.model,
+    year: query.year,
+    yearMin: query.year_min || query.yearMin,
+    yearMax: query.year_max || query.yearMax,
+    mileage: query.mileage,
+    category: query.category,
+    version: query.version,
+    fuel: query.fuel,
+    transmission: query.transmission,
+    drivetrain: query.drivetrain,
+    kind: query.kind,
+    rules: parseRules(query.rules),
+  });
 }
 
 export function getVehicleReport(query = {}) {
@@ -446,6 +429,11 @@ export function getVehicleReport(query = {}) {
     model: query.model || parsed.model,
     year: query.year || parsed.year,
     mileage: query.mileage,
+    version: query.version,
+    fuel: query.fuel,
+    transmission: query.transmission,
+    kind: query.kind,
+    rules: parseRules(query.rules),
     facets: getFacets(),
   };
   const rows = db.prepare(`SELECT * FROM listings WHERE is_active = 1 AND price > 0`).all();

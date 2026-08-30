@@ -1,3 +1,18 @@
+import { parseLocation } from "../server/lib/geo.js";
+import { sanitizeListing, matchesKind } from "./cleanListing.js";
+import {
+  attachPeerDeals,
+  comparableExtremes,
+  inferCategoryIntent,
+  parseKmMax,
+  parseMoneyCLP,
+  parseYearRange,
+  recommendBuys,
+  uniqueOpportunities,
+} from "./intelligence.js";
+import { valueVehicle } from "./valuation.js";
+import { generationsFor } from "./catalog.js";
+
 const YEAR_RE = /\b(19[89]\d|20[0-2]\d)\b/;
 
 export function fold(value) {
@@ -53,20 +68,10 @@ export function summarize(prices) {
 }
 
 /** Yapo a veces deja un dígito extra (397900001 → 39.790.000). */
-export function cleanPrice(price) {
-  const n = Number(price);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  if (n >= 50_000_000 && /00[1-9]$/.test(String(Math.round(n)))) {
-    const cut = Math.round(n / 10);
-    if (cut >= 800_000 && cut <= 90_000_000) return cut;
-  }
-  return n;
-}
+export { sanitizePrice as cleanPrice } from "./cleanListing.js";
 
 export function withCleanPrice(row) {
-  const price = cleanPrice(row.price);
-  if (price == null) return null;
-  return price === row.price ? row : { ...row, price };
+  return sanitizeListing(row, parseLocation);
 }
 
 function tokens(text) {
@@ -75,12 +80,19 @@ function tokens(text) {
 
 export function parseVehicleQuery(text, facets = {}) {
   const raw = fold(text);
-  const yearHit = raw.match(YEAR_RE);
-  const year = yearHit ? Number(yearHit[1]) : null;
-  let rest = yearHit ? raw.replace(yearHit[0], " ") : raw;
+  const range = parseYearRange(text);
+  const yearHit = !range.yearMin ? raw.match(YEAR_RE) : null;
+  const year = range.yearMin ? null : yearHit ? Number(yearHit[1]) : null;
+  let rest = raw;
+  if (range.raw) rest = fold(String(text || "").replace(range.raw, " "));
+  else if (yearHit) rest = rest.replace(yearHit[0], " ");
   rest = rest
     .replace(/\b\d{1,3}(?:\.\d{3})*\s*km\b/g, " ")
     .replace(/\b\d+\s*mil\b/g, " ")
+    .replace(/\b(hasta|max|maximo|presupuesto|menos de|bajo)\b/g, " ")
+    .replace(/\b(millones|millon|mill|palos)\b/g, " ")
+    .replace(/\b(suv|crossover|camioneta|pickup|familiar|oportunidad|oferta|barato|unico|unica)\b/g, " ")
+    .replace(/\b\d{1,2}\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -120,7 +132,23 @@ export function parseVehicleQuery(text, facets = {}) {
     if (hit) model = hit.value;
   }
 
-  return { q: String(text || "").trim(), brand, model, year };
+  return {
+    q: String(text || "").trim(),
+    brand,
+    model,
+    year,
+    yearMin: range.yearMin,
+    yearMax: range.yearMax,
+  };
+}
+
+export function parseSmartQuery(text, facets = {}) {
+  const base = parseVehicleQuery(text, facets);
+  const budgetMax = parseMoneyCLP(text);
+  const kmMax = parseKmMax(text);
+  const category = inferCategoryIntent(text);
+  const intent = /oportun|oferta|barat|remate|unica|único|unico/.test(fold(text)) ? "oportunidad" : "tasar";
+  return { ...base, budgetMax, kmMax, category, intent };
 }
 
 function modelMatches(row, wanted) {
@@ -148,10 +176,15 @@ export function matchListings(rows, query = {}) {
   const brand = query.brand || "";
   const model = query.model || "";
   const year = query.year ? Number(query.year) : null;
-  let matched = rows.map(withCleanPrice).filter(Boolean).filter((row) => {
+  const yearMin = query.yearMin ? Number(query.yearMin) : null;
+  const yearMax = query.yearMax ? Number(query.yearMax) : null;
+  const kind = query.kind || "livianos";
+  let matched = rows.map((row) => sanitizeListing(row, parseLocation)).filter(Boolean).filter((row) => {
+    if (!matchesKind(row, kind)) return false;
+    if (query.category && row.category !== query.category) return false;
     if (brand && !brandMatches(row, brand)) return false;
     if (model && !modelMatches(row, model)) return false;
-    if (!brand && !model && query.q) {
+    if (!brand && !model && query.q && !query.category && !query.budgetMax) {
       const q = fold(query.q).replace(YEAR_RE, " ").trim();
       const hay = fold(`${row.brand} ${row.model} ${row.title}`);
       if (q && !tokens(q).every((t) => t.length < 2 || hay.includes(t))) return false;
@@ -159,21 +192,56 @@ export function matchListings(rows, query = {}) {
     return true;
   });
 
-  let scope = model || brand ? "todos los años del modelo" : "búsqueda libre";
-  if (year) {
+  let scope = model || brand ? "todos los años del modelo" : query.category ? `categoría ${query.category}` : "búsqueda libre";
+  if (yearMin || yearMax) {
+    const lo = yearMin || 1990;
+    const hi = yearMax || 2027;
+    matched = matched.filter((r) => r.year >= lo && r.year <= hi);
+    scope = `años ${lo}–${hi}`;
+  } else if (year) {
     const exact = matched.filter((r) => r.year === year);
+    const near = matched.filter((r) => r.year && Math.abs(r.year - year) <= 1);
     if (exact.length >= 3) {
       matched = exact;
       scope = `año ${year}`;
+    } else if (near.length >= 3) {
+      matched = near;
+      scope = `año ${year} ± 1`;
+    } else if (exact.length) {
+      matched = exact;
+      scope = `año ${year} (pocos avisos)`;
+    } else if (near.length) {
+      matched = near;
+      scope = `año ${year} ± 1 (pocos avisos)`;
     } else {
-      const near = matched.filter((r) => r.year && Math.abs(r.year - year) <= 1);
-      if (near.length >= 3) {
-        matched = near;
-        scope = `año ${year} ± 1`;
-      } else if (exact.length) {
-        matched = exact;
-        scope = `año ${year} (pocos avisos)`;
+      matched = [];
+      scope = `año ${year} (sin avisos)`;
+    }
+  }
+  const kmMax = query.kmMax ? Number(query.kmMax) : null;
+  if (kmMax && Number.isFinite(kmMax) && kmMax > 0 && matched.length) {
+    const capped = matched.filter((r) => r.mileage != null && r.mileage <= kmMax);
+    if (capped.length) {
+      matched = capped;
+      scope += ` · hasta ${Math.round(kmMax / 1000)} mil km`;
+    }
+  } else {
+    const km = query.mileage ? Number(query.mileage) : null;
+    if (km && Number.isFinite(km) && km > 0 && matched.length) {
+      const band = Math.max(20_000, km * 0.3);
+      const nearKm = matched.filter((r) => r.mileage != null && Math.abs(r.mileage - km) <= band);
+      if (nearKm.length) {
+        matched = nearKm;
+        scope += ` · ~${Math.round(km / 1000)} mil km`;
       }
+    }
+  }
+  const budgetMax = query.budgetMax ? Number(query.budgetMax) : null;
+  if (budgetMax && matched.length) {
+    const under = matched.filter((r) => r.price <= budgetMax);
+    if (under.length) {
+      matched = under;
+      scope += ` · hasta ${new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(budgetMax)}`;
     }
   }
   return { rows: matched, scope };
@@ -233,36 +301,51 @@ function decorateRow(row, market) {
 }
 
 export function buildVehicleReport(allRows, query = {}) {
+  const smart = parseSmartQuery(query.q || "", query.facets || {});
   const parsed = {
-    brand: query.brand || "",
-    model: query.model || "",
-    year: query.year ? Number(query.year) : null,
+    brand: query.brand || smart.brand || "",
+    model: query.model || smart.model || "",
+    year: query.year ? Number(query.year) : smart.year,
+    yearMin: query.yearMin || smart.yearMin,
+    yearMax: query.yearMax || smart.yearMax,
     mileage: query.mileage ? Number(query.mileage) : null,
+    kmMax: query.kmMax || smart.kmMax,
+    budgetMax: query.budgetMax || smart.budgetMax,
+    category: query.category || smart.category,
+    intent: query.intent || smart.intent,
+    version: query.version || "",
+    fuel: query.fuel || "",
+    transmission: query.transmission || "",
+    rules: query.rules || {},
+    kind: query.kind || "livianos",
     q: query.q || "",
   };
   if (!parsed.brand && !parsed.model && parsed.q) {
-    const fromText = parseVehicleQuery(parsed.q, query.facets || {});
-    parsed.brand = fromText.brand;
-    parsed.model = fromText.model;
-    parsed.year = parsed.year || fromText.year;
+    parsed.brand = smart.brand;
+    parsed.model = smart.model;
+    parsed.year = parsed.year || smart.year;
   }
 
   const { rows, scope } = matchListings(allRows, parsed);
-  const stats = summarize(rows.map((r) => r.price));
-  const inBand = stats
-    ? rows.filter((r) => r.price >= stats.min && r.price <= stats.max)
+  const statsAll = summarize(rows.map((r) => r.price));
+  const inBand = statsAll
+    ? rows.filter((r) => r.price >= statsAll.min && r.price <= statsAll.max)
     : rows;
 
-  const cheapest = inBand.length ? pick(inBand.reduce((a, b) => (a.price < b.price ? a : b))) : null;
-  const expensive = inBand.length ? pick(inBand.reduce((a, b) => (a.price > b.price ? a : b))) : null;
+  const peerYear = parsed.year || (parsed.yearMin && parsed.yearMax && parsed.yearMin === parsed.yearMax ? parsed.yearMin : null);
+  const extremes = comparableExtremes(inBand, peerYear);
+  const peerRows = extremes.rows?.length ? extremes.rows : inBand;
+  const peerStats = summarize(peerRows.map((r) => r.price)) || statsAll;
+  const cheapest = extremes.cheapest;
+  const expensive = extremes.expensive;
 
-  let sample = inBand;
-  if (parsed.mileage && inBand.length >= 8) {
+  let sample = peerRows;
+  if (parsed.mileage && peerRows.length >= 8) {
     const km = parsed.mileage;
-    const close = inBand.filter((r) => r.mileage && Math.abs(r.mileage - km) <= Math.max(25000, km * 0.35));
+    const close = peerRows.filter((r) => r.mileage && Math.abs(r.mileage - km) <= Math.max(25000, km * 0.35));
     if (close.length >= 5) sample = close;
   }
-  const kmStats = sample === inBand ? stats : summarize(sample.map((r) => r.price));
+  const kmStats = sample === peerRows ? peerStats : summarize(sample.map((r) => r.price));
 
   const byYear = groupStats(
     inBand.filter((r) => r.year >= 2005 && r.year <= 2027),
@@ -282,7 +365,7 @@ export function buildVehicleReport(allRows, query = {}) {
   const byKm = kmBuckets
     .map(([, , label], i) => {
       const [lo, hi] = kmBuckets[i];
-      const items = inBand.filter((r) => r.mileage != null && r.mileage >= lo && r.mileage < hi);
+      const items = peerRows.filter((r) => r.mileage != null && r.mileage >= lo && r.mileage < hi);
       if (!items.length) return null;
       const prices = items.map((r) => r.price).sort((a, b) => a - b);
       return {
@@ -295,7 +378,7 @@ export function buildVehicleReport(allRows, query = {}) {
     })
     .filter(Boolean);
 
-  const scatter = inBand
+  const scatter = peerRows
     .filter((r) => r.mileage != null && r.mileage > 0 && r.mileage < 400000)
     .slice()
     .sort((a, b) => a.mileage - b.mileage)
@@ -307,36 +390,54 @@ export function buildVehicleReport(allRows, query = {}) {
       label: `${r.year || ""} ${r.brand || ""} ${r.model || ""}`.trim(),
     }));
 
-  const listings = inBand
+  const decorated = attachPeerDeals(inBand);
+  const listings = decorated
     .slice()
-    .sort((a, b) => a.price - b.price)
-    .slice(0, 60)
-    .map((r) => decorateRow(r, stats));
+    .sort((a, b) => (a.delta_pct ?? 99) - (b.delta_pct ?? 99) || a.price - b.price)
+    .slice(0, 60);
 
-  const opportunities = listings.filter((r) => r.deal?.key === "oportunidad").slice(0, 8);
+  const opportunities = uniqueOpportunities(inBand, { limit: 8, minPeers: 4 });
+  const recommendations = recommendBuys(inBand, parsed, { limit: 5 });
+  const used = kmStats || peerStats;
+  const valuation = valueVehicle(allRows, {
+    ...parsed,
+    year: parsed.year || extremes.year,
+  });
+  const generation = query.catalog ? generationsFor(query.catalog, parsed.brand, parsed.model) : null;
+  const yearLabel = extremes.year ? `año ${extremes.year}` : "mismo modelo";
+  const insight = extremes.year
+    ? `Más barato y más caro se comparan en el ${yearLabel} (${extremes.n} avisos). No mezclamos un auto viejo con uno nuevo.`
+    : "Necesitamos marca y modelo para comparar pares del mismo año.";
 
-  const used = kmStats || stats;
+  const citySource = extremes.year ? peerRows : inBand;
+
   return {
     query: parsed,
-    label: [parsed.brand, parsed.model, parsed.year].filter(Boolean).join(" ") || parsed.q || "Vehículo",
+    label: [parsed.brand, parsed.model, parsed.year || (parsed.yearMin && parsed.yearMax ? `${parsed.yearMin}–${parsed.yearMax}` : "")].filter(Boolean).join(" ") || parsed.q || "Vehículo",
     sample: inBand.length,
-    scope,
+    peer_n: extremes.n,
+    peer_year: extremes.year,
+    scope: extremes.year && !parsed.year && !parsed.yearMin ? `${scope} · comparables ${yearLabel}` : scope,
+    insight,
     stats: used,
     band: used ? { low: used.p25, mid: used.p50, high: used.p75 } : null,
-    suggested_buy: used ? Math.round(used.p25 * 0.98) : null,
-    suggested_list: used ? Math.round(used.p50 * 1.03) : null,
+    suggested_buy: valuation.buy || (used ? Math.round(used.p25 * 0.88) : null),
+    suggested_list: valuation.retail || (used ? Math.round(used.p50) : null),
+    valuation,
+    generation,
     cheapest,
     expensive,
     byYear,
     byKm,
-    byRegion: groupStats(inBand, (r) => r.region).slice(0, 12),
-    byCity: groupStats(inBand, (r) => r.city).filter((g) => g.name !== "Sin dato").slice(0, 16),
+    byRegion: groupStats(citySource, (r) => r.region).slice(0, 12),
+    byCity: groupStats(citySource, (r) => r.city).filter((g) => g.name !== "Sin dato").slice(0, 16),
     bySource: groupStats(inBand, (r) => r.source),
     byFuel: groupStats(inBand, (r) => r.fuel).filter((g) => g.name !== "Sin dato").slice(0, 6),
     byTransmission: groupStats(inBand, (r) => r.transmission).filter((g) => g.name !== "Sin dato").slice(0, 6),
     scatter,
     listings,
     opportunities,
+    recommendations,
   };
 }
 
@@ -347,7 +448,8 @@ export function filterListings(rows, filters = {}) {
   const priceMin = filters.price_min ? Number(filters.price_min) : null;
   const priceMax = filters.price_max ? Number(filters.price_max) : null;
   const kmMax = filters.km_max ? Number(filters.km_max) : null;
-  let out = rows.map(withCleanPrice).filter(Boolean).filter((row) => {
+  let out = rows.map((row) => sanitizeListing(row, parseLocation)).filter(Boolean).filter((row) => {
+    if (filters.kind && !matchesKind(row, filters.kind)) return false;
     if (filters.brand && fold(row.brand) !== fold(filters.brand)) return false;
     if (filters.model && !modelMatches(row, filters.model)) return false;
     if (filters.category && row.category !== filters.category) return false;
@@ -373,12 +475,12 @@ export function filterListings(rows, filters = {}) {
     km_asc: (a, b) => (a.mileage ?? 9e9) - (b.mileage ?? 9e9),
     recent: (a, b) => String(b.last_seen || b.id).localeCompare(String(a.last_seen || a.id)),
   };
-  out.sort(sortMap[filters.sort] || sortMap.price_asc);
+  out.sort(sortMap[filters.sort] || sortMap.recent);
   const page = Math.max(1, Number(filters.page) || 1);
   const limit = Math.min(60, Math.max(10, Number(filters.limit) || 24));
-  const stats = summarize(out.map((r) => r.price));
-  const total = out.length;
-  const rowsPage = out.slice((page - 1) * limit, page * limit).map((r) => decorateRow(r, stats));
+  const decorated = attachPeerDeals(out);
+  const total = decorated.length;
+  const rowsPage = decorated.slice((page - 1) * limit, page * limit);
   return { total, page, limit, rows: rowsPage };
 }
 
@@ -396,7 +498,7 @@ export function suggestVehicles(facets, text) {
       else if (tokens(q).every((t) => fl.includes(t))) score = 200 + (m.n || 0);
       return { brand: m.brand, model: m.value, n: m.n, label, score };
     })
-    .filter((s) => s.score > 0 && s.brand && s.model);
+    .filter((s) => s.score > 0 && s.brand && s.model && !/^(de|con|para|moto|electrica)$/i.test(s.model));
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, q ? 8 : 6);
 }

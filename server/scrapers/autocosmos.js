@@ -16,7 +16,8 @@ function parseCard($, el) {
   const url = href.startsWith("http") ? href : `https://www.autocosmos.cl${href}`;
   const idMatch = href.match(/\/(\d+)(?:\/)?(?:\?|$)/) || href.match(/usado\/[^/]+\/([^/?]+)/);
   const text = node.text().replace(/\s+/g, " ").trim();
-  const price = text.match(/\$\s*[\d.]+/);
+  const amounts = [...text.matchAll(/\$\s*([\d.]+)/g)].map((m) => m[0]);
+  const price = /pie\s*:/i.test(text) && amounts.length > 1 ? amounts[amounts.length - 1] : amounts[0];
   const title = node.find("h2, h3, .title, .nombre, a").first().text().trim() || text.slice(0, 90);
   const km = parseKm(text);
   const year = parseYear(text);
@@ -29,12 +30,12 @@ function parseCard($, el) {
     source: "autocosmos",
     external_id: String(externalId),
     url,
-    title,
+    title: /pie/i.test(text) ? `${title} ${text}` : title,
     brand,
     model: model && !/^\d+$/.test(model) ? model : undefined,
     year,
     mileage: km,
-    price: price?.[0],
+    price,
     category: "auto",
     image_url: img,
     condition: "usado",

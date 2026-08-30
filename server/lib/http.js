@@ -21,7 +21,7 @@ export async function mapPool(items, limit, fn) {
   return out;
 }
 
-export async function fetchText(url, { ua = "desktop", accept = "*/*", headers = {}, timeoutMs = 25000 } = {}) {
+async function fetchTextOnce(url, { ua = "desktop", accept = "*/*", headers = {}, timeoutMs = 25000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -40,6 +40,24 @@ export async function fetchText(url, { ua = "desktop", accept = "*/*", headers =
     return { ok: res.ok, status: res.status, url: res.url, text, contentType: res.headers.get("content-type") || "" };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export async function fetchText(url, opts = {}) {
+  try {
+    return await withRetry(async () => {
+      const result = await fetchTextOnce(url, opts);
+      if (result.status === 429 || result.status >= 500) {
+        const err = new Error(`HTTP ${result.status} ${url}`);
+        err.status = result.status;
+        err.result = result;
+        throw err;
+      }
+      return result;
+    }, { tries: 3, delayMs: 1000 });
+  } catch (err) {
+    if (err.result) return err.result;
+    throw err;
   }
 }
 

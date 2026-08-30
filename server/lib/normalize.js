@@ -1,5 +1,6 @@
 import { parseKm, parsePrice, parseYear, titleCase, cleanText } from "./parse.js";
 import { parseLocation } from "./geo.js";
+import { sanitizeListing, sanitizeModel, sanitizeYear, sanitizeKm, isJunkBrand } from "../../shared/cleanListing.js";
 
 export const BRANDS = [
   "Toyota", "Hyundai", "Chevrolet", "Kia", "Nissan", "Suzuki", "Ford", "Mazda",
@@ -39,17 +40,14 @@ const BRAND_ALIAS = {
 
 const SORTED_BRANDS = [...BRANDS].sort((a, b) => b.length - a.length);
 
-const JUNK_BRANDS = new Set([
-  "moto", "motos", "motocicleta", "cuatrimoto", "triciclo", "tlriciclo",
-  "bicicleta", "silla", "torito", "semi", "de",
-]);
-
 export function normalizeBrand(value, title = "") {
   const hay = `${value || ""} ${title || ""}`.toLowerCase().replace(/[-_]/g, " ");
   const raw = cleanText(value)?.toLowerCase();
-  if (raw && JUNK_BRANDS.has(raw)) {
-    const fromTitle = SORTED_BRANDS.find((brand) => new RegExp(`\\b${brand.replace(/[-]/g, "[- ]")}\\b`, "i").test(title || ""));
-    return fromTitle ? normalizeBrandName(fromTitle) : null;
+  const fromTitle = () =>
+    SORTED_BRANDS.find((brand) => new RegExp(`\\b${brand.replace(/[-]/g, "[- ]")}\\b`, "i").test(title || ""));
+  if (raw && isJunkBrand(raw)) {
+    const hit = fromTitle();
+    return hit ? normalizeBrandName(hit) : null;
   }
   const aliasHit = BRAND_ALIAS[raw];
   if (aliasHit) return aliasHit;
@@ -57,7 +55,12 @@ export function normalizeBrand(value, title = "") {
     const re = new RegExp(`\\b${brand.replace(/[-]/g, "[- ]")}\\b`, "i");
     if (re.test(hay)) return normalizeBrandName(brand);
   }
-  return titleCase(value);
+  const named = titleCase(value);
+  if (isJunkBrand(named)) {
+    const hit = fromTitle();
+    return hit ? normalizeBrandName(hit) : null;
+  }
+  return named;
 }
 
 function normalizeBrandName(brand) {
@@ -94,33 +97,36 @@ export function fingerprint(row) {
 export function toListing(partial) {
   const title = cleanText(partial.title);
   const brand = normalizeBrand(partial.brand, title);
-  const model = titleCase(partial.model) || inferModel(title, brand);
+  const category = normalizeCategory(partial.category, [partial.body_type, title, partial.model]);
+  const loc = parseLocation([partial.city, partial.region].filter(Boolean).join(" | "));
   const row = {
     source: partial.source,
     external_id: String(partial.external_id),
     url: partial.url || null,
     title,
     brand,
-    model,
+    model: sanitizeModel(brand, titleCase(partial.model) || inferModel(title, brand), title),
     version: cleanText(partial.version),
-    year: parseYear(partial.year) || parseYear(title),
-    mileage: parseKm(partial.mileage),
-    price: parsePrice(partial.price),
+    year: sanitizeYear(parseYear(partial.year) || parseYear(title)),
+    mileage: sanitizeKm(parseKm(partial.mileage)),
+    price: parsePrice(partial.price, category, title),
     currency: partial.currency || "CLP",
-    category: normalizeCategory(partial.category, partial.body_type),
+    category,
     body_type: cleanText(partial.body_type),
     fuel: cleanText(partial.fuel)?.toLowerCase(),
     transmission: cleanText(partial.transmission)?.toLowerCase(),
     drivetrain: cleanText(partial.drivetrain)?.toLowerCase(),
-    region: parseLocation(partial.region || partial.city).region || cleanText(partial.region),
-    city: parseLocation(partial.city || partial.region).city || cleanText(partial.city),
+    region: loc.region,
+    city: loc.city,
     seller_type: normalizeSeller(partial.seller_type),
     seller_name: cleanText(partial.seller_name),
     image_url: partial.image_url && !String(partial.image_url).startsWith("data:") ? partial.image_url : null,
     condition: /new|nuevo/i.test(partial.condition || "") ? "nuevo" : "usado",
   };
-  row.fingerprint = fingerprint(row);
-  return row;
+  const clean = sanitizeListing(row, parseLocation);
+  if (!clean) return { ...row, price: null };
+  clean.fingerprint = fingerprint(clean);
+  return clean;
 }
 
 function inferModel(title, brand) {

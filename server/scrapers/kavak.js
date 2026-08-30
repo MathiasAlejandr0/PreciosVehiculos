@@ -1,97 +1,61 @@
 import * as cheerio from "cheerio";
 import { fetchText, sleep } from "../lib/http.js";
-import { parseKm, parseYear } from "../lib/parse.js";
+import { parseKm, parseYear, pickListedPrice, titleCase } from "../lib/parse.js";
 import { toListing } from "../lib/normalize.js";
 
-const API_CANDIDATES = [
-  "https://www.kavak.com/cl/api/inventory?limit=40&page=1",
-  "https://www.kavak.com/api/v1/car?country=cl&limit=40",
-];
-
-function fromApiCar(car, idx) {
-  const id = car.id || car.sku || car.carId || car.inventoryId || idx;
+function parseCard($, el) {
+  const node = $(el);
+  const href = node.attr("href") || "";
+  if (!/\/cl\/venta\//.test(href)) return null;
+  const url = href.startsWith("http") ? href : `https://www.kavak.com${href}`;
+  const slug = url.split("/").filter(Boolean).pop();
+  if (!slug) return null;
+  const text = node.text().replace(/\s+/g, " ").trim();
+  const price = pickListedPrice(text, 1_500_000);
+  if (!price) return null;
+  const year = parseYear(slug) || parseYear(text);
+  const bits = slug.replace(/-\d{4}$/, "").split("-");
+  const brand = bits[0];
+  const model = (bits[1] || "").replace(/_/g, " ");
+  const img = node.find("img").attr("src") || node.find("img").attr("data-src");
   return toListing({
     source: "kavak",
-    external_id: String(id),
-    url: car.url || car.permalink || (car.slug ? `https://www.kavak.com/cl/usados/${car.slug}` : "https://www.kavak.com/cl/usados"),
-    title: car.name || car.title || `${car.make || car.brand} ${car.model}`,
-    brand: car.make || car.brand,
-    model: car.model,
-    version: car.version || car.trim,
-    year: car.year,
-    mileage: car.km || car.mileage || car.odometer,
-    price: car.price || car.salePrice || car.amount,
-    category: car.bodyType || "auto",
-    fuel: car.fuel,
-    transmission: car.transmission,
-    region: car.city || car.region || "Metropolitana de Santiago",
+    external_id: slug,
+    url,
+    title: [titleCase(brand), titleCase(model), year].filter(Boolean).join(" ") || text.slice(0, 80),
+    brand,
+    model,
+    year,
+    mileage: parseKm(text),
+    price,
+    category: /suv/i.test(slug) ? "suv" : /camioneta|pickup/i.test(slug) ? "camioneta" : "auto",
+    transmission: /automático|automatico|cvt|auto\b/i.test(text) ? "automática" : /manual/i.test(text) ? "manual" : null,
+    region: "Metropolitana de Santiago",
     seller_type: "kavak",
-    image_url: car.image || car.imageUrl || car.photos?.[0],
+    image_url: img,
     condition: "usado",
   });
 }
 
-function fromHtml(html) {
-  const $ = cheerio.load(html);
-  const items = [];
-  $("a[href*='/cl/usados/'], a[href*='/usados/']").each((_, el) => {
-    const node = $(el);
-    const href = node.attr("href");
-    if (!href || href.endsWith("/usados") || href.endsWith("/usados/")) return;
-    const text = node.text().replace(/\s+/g, " ").trim();
-    const price = text.match(/\$\s*[\d.]+/);
-    if (!price) return;
-    const url = href.startsWith("http") ? href : `https://www.kavak.com${href}`;
-    const slug = href.split("/").filter(Boolean).pop();
-    const title = node.find("h2, h3, p").first().text().trim() || text.slice(0, 80);
-    items.push(toListing({
-      source: "kavak",
-      external_id: slug,
-      url,
-      title,
-      brand: title.split(" ")[0],
-      model: title.split(" ")[1],
-      year: parseYear(text),
-      mileage: parseKm(text),
-      price: price[0],
-      seller_type: "kavak",
-      condition: "usado",
-    }));
-  });
-  return items.filter((x) => x.price);
-}
-
 export async function scrapeKavak({ maxPages = 4, onProgress } = {}) {
-  for (const api of API_CANDIDATES) {
-    try {
-      const res = await fetchText(api, { ua: "desktop", accept: "application/json" });
-      if (!res.ok || !res.contentType.includes("json")) continue;
-      const json = JSON.parse(res.text);
-      const cars = json.items || json.cars || json.results || json.data || [];
-      if (Array.isArray(cars) && cars.length) {
-        const items = cars.map(fromApiCar).filter((x) => x.price);
-        onProgress?.({ source: "kavak", listings: items.length, message: "API Kavak" });
-        return items;
-      }
-    } catch {
-      /* try next */
-    }
-  }
-
   const all = [];
   const seen = new Set();
   for (let page = 1; page <= maxPages; page++) {
     const url = page === 1 ? "https://www.kavak.com/cl/usados" : `https://www.kavak.com/cl/usados?page=${page}`;
     try {
       const res = await fetchText(url, { ua: "desktop" });
-      const items = fromHtml(res.text);
-      for (const row of items) {
-        if (seen.has(row.external_id)) continue;
+      if (!res.ok) break;
+      const $ = cheerio.load(res.text);
+      let added = 0;
+      $("a[href*='/cl/venta/']").each((_, el) => {
+        const row = parseCard($, el);
+        if (!row?.price || seen.has(row.external_id)) return;
         seen.add(row.external_id);
         all.push(row);
-      }
-      onProgress?.({ source: "kavak", pages: page, listings: all.length });
-      if (!items.length) break;
+        added += 1;
+      });
+      onProgress?.({ source: "kavak", pages: page, listings: all.length, message: `pág. ${page}: +${added}` });
+      if (!added) break;
       await sleep(300);
     } catch (err) {
       onProgress?.({ source: "kavak", error: err.message });

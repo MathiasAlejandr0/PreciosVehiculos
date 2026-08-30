@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -11,8 +11,15 @@ import {
   YAxis,
 } from "recharts";
 import { filterListings } from "../../shared/vehicleReport.js";
+import { buildMarketIntel } from "../../shared/intelligence.js";
+import { overviewFromRows } from "../../shared/overview.js";
+import { sanitizeListing, facetsFromRows } from "../../shared/cleanListing.js";
+import { parseLocation } from "../../server/lib/geo.js";
+import { FB_CITIES, facebookVehiclesUrl } from "../../shared/facebook.js";
+import { valueVehicle } from "../../shared/valuation.js";
 import SearchHome from "./SearchHome.jsx";
-import { Badge, Card, ChartTip, Field, Select, Stat, clp, num } from "./ui.jsx";
+import ValuationPanel from "./ValuationPanel.jsx";
+import { Badge, Card, ChartTip, Field, Select, SOURCE_NAME, Stat, clp, num } from "./ui.jsx";
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -22,9 +29,23 @@ async function api(path, opts) {
 
 export default function App() {
   const [tab, setTab] = useState("buscar");
+  const [seen, setSeen] = useState({ buscar: true });
+  const crawlRunning = useRef(false);
+  const scrollByTab = useRef({ buscar: 0, mercado: 0, territorio: 0, avisos: 0 });
   const [stats, setStats] = useState(null);
-  const [facets, setFacets] = useState({ brands: [], models: [], regions: [], cities: [], sources: [], categories: [] });
+  const [facets, setFacets] = useState({
+    brands: [],
+    models: [],
+    versions: [],
+    fuels: [],
+    transmissions: [],
+    regions: [],
+    cities: [],
+    sources: [],
+    categories: [],
+  });
   const [catalog, setCatalog] = useState(null);
+  const [snapAt, setSnapAt] = useState(null);
   const [crawl, setCrawl] = useState(null);
   const [listings, setListings] = useState({ rows: [], total: 0, page: 1 });
   const [detail, setDetail] = useState(null);
@@ -45,6 +66,27 @@ export default function App() {
     page: 1,
   });
 
+  const intel = useMemo(() => (catalog?.length ? buildMarketIntel(catalog) : null), [catalog]);
+  const liveOverview = useMemo(
+    () => (catalog?.length ? overviewFromRows(catalog, { catalog: stats?.catalog || [] }) : null),
+    [catalog, stats?.catalog]
+  );
+  const detailValuation = useMemo(() => {
+    if (!detail || !catalog?.length) return null;
+    const kind =
+      detail.category === "moto" ? "moto" : detail.category === "camion" ? "camion" : "livianos";
+    return valueVehicle(catalog, {
+      brand: detail.brand,
+      model: detail.model,
+      year: detail.year,
+      mileage: detail.mileage,
+      version: detail.version,
+      fuel: detail.fuel,
+      transmission: detail.transmission,
+      kind,
+    });
+  }, [detail, catalog]);
+
   const query = useMemo(() => {
     const p = new URLSearchParams();
     Object.entries(filters).forEach(([k, v]) => {
@@ -53,37 +95,63 @@ export default function App() {
     return p.toString();
   }, [filters]);
 
+  const goTab = useCallback((id) => {
+    setSeen((s) => (s[id] ? s : { ...s, [id]: true }));
+    setTab((prev) => {
+      if (prev === id) return prev;
+      scrollByTab.current[prev] = window.scrollY;
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: scrollByTab.current[id] || 0, left: 0, behavior: "instant" });
+      });
+      return id;
+    });
+  }, []);
+
   const refreshCrawl = useCallback(async () => {
     try {
-      setCrawl(await api("/api/crawl"));
+      const next = await api("/api/crawl");
+      setCrawl((prev) => {
+        if (
+          prev &&
+          prev.running === next.running &&
+          prev.message === next.message &&
+          prev.inventory === next.inventory
+        ) {
+          return prev;
+        }
+        return next;
+      });
+      return next;
     } catch {
-      /* ignore */
+      return null;
     }
   }, []);
 
   const refreshStats = useCallback(async () => {
-    if (import.meta.env.PROD) {
-      try {
-        const r = await fetch("/data/stats.json");
-        if (r.ok) {
-          const payload = await r.json();
-          setStats(payload.stats || payload);
-          if (payload.facets) setFacets(payload.facets);
-          return;
-        }
-      } catch {
-        /* cae al API local */
+    try {
+      const r = await fetch("/data/stats.json");
+      if (r.ok) {
+        const payload = await r.json();
+        setStats(payload.stats || payload);
+        if (payload.generatedAt) setSnapAt(payload.generatedAt);
+        return;
       }
+    } catch {
+      /* cae al API local */
     }
-    const [s, f] = await Promise.all([api("/api/stats"), api("/api/facets")]);
+    const s = await api("/api/stats");
     setStats(s);
-    setFacets(f);
   }, []);
 
   useEffect(() => {
     fetch("/data/listings.json")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then((d) => setCatalog(d.rows || []))
+      .then((d) => {
+        const rows = (d.rows || []).map((row) => sanitizeListing(row, parseLocation)).filter(Boolean);
+        setCatalog(rows);
+        setFacets(facetsFromRows(rows));
+        if (d.generatedAt) setSnapAt(d.generatedAt);
+      })
       .catch(() => setCatalog([]));
   }, []);
 
@@ -98,19 +166,26 @@ export default function App() {
   useEffect(() => {
     refreshStats().catch(() => {});
     refreshCrawl();
+  }, [refreshCrawl, refreshStats]);
+
+  useEffect(() => {
+    if (!crawl?.running) return undefined;
     const id = setInterval(refreshCrawl, 2500);
     return () => clearInterval(id);
-  }, [refreshCrawl, refreshStats]);
+  }, [crawl?.running, refreshCrawl]);
+
+  useEffect(() => {
+    if (crawlRunning.current && crawl && !crawl.running) {
+      refreshStats().catch(() => {});
+    }
+    crawlRunning.current = Boolean(crawl?.running);
+  }, [crawl?.running, refreshStats]);
 
   useEffect(() => {
     if (tab === "avisos") refreshListings().catch(() => {});
   }, [tab, refreshListings]);
 
-  useEffect(() => {
-    if (crawl && !crawl.running && crawl.inventory) refreshStats().catch(() => {});
-  }, [crawl?.running, crawl?.inventory, refreshStats]);
-
-  async function openDetail(row) {
+  const openDetail = useCallback(async (row) => {
     setDetail(row);
     if (import.meta.env.PROD) return;
     try {
@@ -118,7 +193,7 @@ export default function App() {
     } catch {
       /* nos quedamos con el aviso del catálogo */
     }
-  }
+  }, []);
 
   async function runCrawl(mode) {
     if (import.meta.env.PROD) return;
@@ -136,7 +211,7 @@ export default function App() {
     <div className="min-h-screen bg-[#08111c] text-slate-100">
       <header className="sticky top-0 z-20 border-b border-white/10 bg-[#08111c]/90 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3">
-          <button className="text-left" onClick={() => setTab("buscar")}>
+          <button className="text-left" onClick={() => goTab("buscar")}>
             <div className="text-lg font-semibold tracking-tight">
               Precio<span className="text-amber-400">Auto</span>
             </div>
@@ -151,7 +226,7 @@ export default function App() {
             ].map(([id, label]) => (
               <button
                 key={id}
-                onClick={() => setTab(id)}
+                onClick={() => goTab(id)}
                 className={`rounded-full px-4 py-1.5 text-sm whitespace-nowrap ${tab === id ? "bg-amber-400 text-black" : "text-slate-300 hover:text-white"}`}
               >
                 {label}
@@ -160,7 +235,11 @@ export default function App() {
           </nav>
           <div className="flex items-center gap-2">
             {import.meta.env.PROD ? (
-              <span className="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-slate-400">Datos del último snapshot</span>
+              <span className="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-slate-400">
+                {snapAt
+                  ? `Snapshot ${new Date(snapAt).toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" })}`
+                  : "Datos del último snapshot"}
+              </span>
             ) : (
               <>
                 <button onClick={() => runCrawl("quick")} className="rounded-lg border border-white/15 px-3 py-1.5 text-xs hover:border-amber-400/50">
@@ -173,30 +252,49 @@ export default function App() {
             )}
           </div>
         </div>
-        {crawl ? (
-          <div className="border-t border-white/5 bg-black/20 px-4 py-2 text-center text-xs text-slate-400">
-            {crawl.running ? (
-              <span className="text-amber-300">Rastreando en vivo · {crawl.message}</span>
-            ) : (
-              <span>
-                {num.format(crawl.inventory || 0)} avisos indexados
-                {crawl.message ? ` · ${crawl.message}` : ""}
-              </span>
-            )}
-          </div>
-        ) : null}
+        <div className="min-h-9 border-t border-white/5 bg-black/20 px-4 py-2 text-center text-xs text-slate-400">
+          {crawl?.running ? (
+            <span className="text-amber-300">Rastreando en vivo · {crawl.message}</span>
+          ) : (
+            <span>
+              {num.format(catalog?.length || stats?.totals?.listings || crawl?.inventory || 0)} avisos indexados
+              {snapAt ? ` · ${new Date(snapAt).toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" })}` : ""}
+              {crawl?.message && crawl.message !== "En espera" ? ` · ${crawl.message}` : ""}
+            </span>
+          )}
+        </div>
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6">
-        {tab === "buscar" ? <SearchHome facets={facets} catalog={catalog} onOpen={openDetail} /> : null}
+        {seen.buscar ? (
+          <div hidden={tab !== "buscar"}>
+            <SearchHome facets={facets} catalog={catalog} onOpen={openDetail} />
+          </div>
+        ) : null}
 
-        {tab === "mercado" && stats ? (
-          <div className="space-y-6">
+        {seen.mercado && stats ? (
+          <div hidden={tab !== "mercado"} className="space-y-6">
             <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <Stat label="Avisos activos" value={num.format(stats.totals.listings || 0)} hint="Fuentes públicas de Chile" />
-              <Stat label="Precio promedio" value={stats.totals.avg_price ? clp.format(stats.totals.avg_price) : "—"} />
-              <Stat label="Más barato" value={stats.totals.min_price ? clp.format(stats.totals.min_price) : "—"} hint={stats.geo?.cheapest?.[0] ? `${stats.geo.cheapest[0].city || stats.geo.cheapest[0].region || ""}` : ""} />
-              <Stat label="Más caro" value={stats.totals.max_price ? clp.format(stats.totals.max_price) : "—"} hint={stats.geo?.expensive?.[0] ? `${stats.geo.expensive[0].city || stats.geo.expensive[0].region || ""}` : ""} />
+              <Stat
+                label="Avisos indexados"
+                value={num.format(stats.totals.listings || 0)}
+                hint={stats.totals.livianos != null ? `${num.format(stats.totals.livianos)} livianos tasables` : "Todas las categorías"}
+              />
+              <Stat
+                label="Precio promedio livianos"
+                value={stats.totals.avg_price ? clp.format(stats.totals.avg_price) : "—"}
+                hint="Solo autos, SUV y comerciales"
+              />
+              <Stat
+                label="Mejor oportunidad"
+                value={intel?.bestDeal?.price ? clp.format(intel.bestDeal.price) : "—"}
+                hint={intel?.bestDeal ? `${intel.bestDeal.year} ${intel.bestDeal.brand} ${intel.bestDeal.model} · ${intel.bestDeal.delta_pct}% vs su año` : "Mismo modelo y año"}
+              />
+              <Stat
+                label="Más sobreprecio vs su par"
+                value={intel?.worstDeal?.price ? clp.format(intel.worstDeal.price) : "—"}
+                hint={intel?.worstDeal ? `${intel.worstDeal.year} ${intel.worstDeal.brand} ${intel.worstDeal.model} · +${intel.worstDeal.delta_pct}% vs su año` : "No es el auto más caro del país"}
+              />
             </section>
 
             <section className="grid gap-4 lg:grid-cols-2">
@@ -275,7 +373,7 @@ export default function App() {
                 <div className="space-y-2">
                   {stats.topBrands.map((b) => (
                     <div key={b.brand} className="flex items-center justify-between text-sm">
-                      <button className="text-left hover:text-amber-300" onClick={() => { setFilters((f) => ({ ...f, brand: b.brand, page: 1 })); setTab("avisos"); }}>
+                      <button className="text-left hover:text-amber-300" onClick={() => { setFilters((f) => ({ ...f, brand: b.brand, page: 1 })); goTab("avisos"); }}>
                         {b.brand}
                       </button>
                       <span className="font-mono text-slate-400">{num.format(b.n)} · {clp.format(b.avg_price)}</span>
@@ -287,7 +385,7 @@ export default function App() {
                 <h2 className="mb-3 text-sm font-semibold">Por portal</h2>
                 {stats.bySource.map((s) => (
                   <div key={s.source} className="mb-2 flex justify-between text-sm">
-                    <span className="capitalize">{s.source}</span>
+                    <span className="capitalize">{SOURCE_NAME[s.source] || s.source}</span>
                     <span className="font-mono text-slate-400">{num.format(s.n)}</span>
                   </div>
                 ))}
@@ -312,14 +410,14 @@ export default function App() {
 
             <section>
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-semibold">Oportunidades vs. mediana del mercado</h2>
-                <button className="text-xs text-amber-300" onClick={() => setTab("avisos")}>Ver todos los avisos</button>
+                <h2 className="text-sm font-semibold">Oportunidades únicas vs. su modelo y año</h2>
+                <button className="text-xs text-amber-300" onClick={() => goTab("avisos")}>Ver todos los avisos</button>
               </div>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                {stats.opportunities.map((row) => (
+                {(intel?.opportunities || stats.opportunities || []).map((row) => (
                   <Card key={row.id} row={row} onOpen={openDetail} />
                 ))}
-                {!stats.opportunities.length ? (
+                {!(intel?.opportunities || stats.opportunities || []).length ? (
                   <div className="col-span-full rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-400">
                     Aún no hay comparables suficientes. Lanza un barrido para llenar el mercado.
                   </div>
@@ -329,11 +427,11 @@ export default function App() {
           </div>
         ) : null}
 
-        {tab === "territorio" && stats ? (
-          <div className="space-y-6">
+        {seen.territorio && stats ? (
+          <div hidden={tab !== "territorio"} className="space-y-6">
             <section className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <h2 className="mb-1 text-sm font-semibold">Portales cubiertos (de mayor a menor volumen)</h2>
-              <p className="mb-3 text-xs text-slate-400">Se priorizan Chileautos, Yapo y Mercado Libre; el resto suma precio de automotora y compra directa.</p>
+              <p className="mb-3 text-xs text-slate-400">Se priorizan Chileautos, Yapo, Mercado Libre y Facebook Marketplace. Kavak, Clicar, Checkeados y auto.cl aportan precio de automotora, seminuevos inspeccionados y financiamiento.</p>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 {(stats.catalog || []).map((s) => (
                   <a key={s.id} href={s.url} target="_blank" rel="noreferrer" className="rounded-xl border border-white/10 p-3 text-sm hover:border-amber-400/40">
@@ -343,22 +441,69 @@ export default function App() {
                 ))}
               </div>
             </section>
+            {(liveOverview?.vehicles?.brands || []).length ? (
+              <section className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <h2 className="mb-1 text-sm font-semibold">Catálogo canónico (inferido de avisos)</h2>
+                <p className="mb-3 text-xs text-slate-400">
+                  Marca → modelo → generación (hueco de años) y versiones más frecuentes. No es un catálogo de fábrica.
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  {liveOverview.vehicles.brands.slice(0, 8).map((b) => (
+                    <div key={b.brand} className="rounded-xl border border-white/10 p-3 text-sm">
+                      <div className="font-semibold">{b.brand}</div>
+                      <div className="text-[11px] text-slate-500">{num.format(b.n)} avisos</div>
+                      <ul className="mt-2 space-y-1 text-xs text-slate-300">
+                        {b.models.slice(0, 4).map((m) => (
+                          <li key={m.model}>
+                            {m.model}
+                            {m.generations?.length
+                              ? ` · ${m.generations.map((g) => `${g.from}–${g.to}`).join(", ")}`
+                              : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            <section className="rounded-2xl border border-[#1877f2]/30 bg-[#1877f2]/10 p-4">
+              <h2 className="mb-1 text-sm font-semibold">Facebook Marketplace por ciudad</h2>
+              <p className="mb-3 text-xs text-slate-400">
+                Avisos de particulares. Ábrelos en Facebook; el portal pide sesión y bloquea el barrido automático.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {FB_CITIES.map((c) => (
+                  <a
+                    key={c.slug}
+                    href={facebookVehiclesUrl(c.slug)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-full border border-white/15 px-3 py-1 text-xs hover:border-[#1877f2] hover:text-white"
+                  >
+                    {c.name}
+                  </a>
+                ))}
+              </div>
+            </section>
             <section className="grid gap-4 lg:grid-cols-2">
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                <h2 className="mb-3 text-sm font-semibold">Más baratos ahora</h2>
-                {(stats.geo?.cheapest || []).map((row) => (
+                <h2 className="mb-1 text-sm font-semibold">Mejor precio vs su modelo y año</h2>
+                <p className="mb-3 text-xs text-slate-500">No es el auto más barato del país: es el que más se desvía a la baja frente a pares del mismo año.</p>
+                {(intel?.opportunities || stats.geo?.cheapest || []).map((row) => (
                   <a key={row.id} href={row.url} target="_blank" rel="noreferrer" className="mb-2 flex justify-between gap-3 text-sm hover:text-amber-300">
                     <span className="truncate">{row.year} {row.brand} {row.model}</span>
-                    <span className="shrink-0 font-mono text-emerald-300">{clp.format(row.price)} · {row.city || row.region || "—"}</span>
+                    <span className="shrink-0 font-mono text-emerald-300">{clp.format(row.price)}{row.delta_pct != null ? ` · ${row.delta_pct}%` : ""}</span>
                   </a>
                 ))}
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                <h2 className="mb-3 text-sm font-semibold">Más caros ahora</h2>
-                {(stats.geo?.expensive || []).map((row) => (
+                <h2 className="mb-1 text-sm font-semibold">Más caros vs su modelo y año</h2>
+                <p className="mb-3 text-xs text-slate-500">Sobreprecio frente a la mediana de ese mismo modelo y año, no un auto de lujo suelto.</p>
+                {(intel?.overpriced || stats.geo?.expensive || []).map((row) => (
                   <a key={row.id} href={row.url} target="_blank" rel="noreferrer" className="mb-2 flex justify-between gap-3 text-sm hover:text-amber-300">
                     <span className="truncate">{row.year} {row.brand} {row.model}</span>
-                    <span className="shrink-0 font-mono text-rose-300">{clp.format(row.price)} · {row.city || row.region || "—"}</span>
+                    <span className="shrink-0 font-mono text-rose-300">{clp.format(row.price)}{row.delta_pct != null ? ` · +${row.delta_pct}%` : ""}</span>
                   </a>
                 ))}
               </div>
@@ -389,22 +534,22 @@ export default function App() {
                     <th>Mínimo</th>
                     <th>Mediana</th>
                     <th>Máximo</th>
-                    <th>Más barato</th>
-                    <th>Más caro</th>
+                    <th>Mejor trato</th>
+                    <th>Más caro vs par</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(stats.geo?.byCity || []).map((c) => (
+                  {(liveOverview?.geo?.byCity || stats.geo?.byCity || []).map((c) => (
                     <tr key={c.name} className="border-t border-white/5">
                       <td className="py-2">
-                        <button className="hover:text-amber-300" onClick={() => { setFilters((f) => ({ ...f, city: c.name, page: 1 })); setTab("avisos"); }}>{c.name}</button>
+                        <button className="hover:text-amber-300" onClick={() => { setFilters((f) => ({ ...f, city: c.name, page: 1 })); goTab("avisos"); }}>{c.name}</button>
                       </td>
                       <td className="font-mono">{num.format(c.n)}</td>
                       <td className="font-mono text-emerald-300">{clp.format(c.min_price)}</td>
                       <td className="font-mono">{clp.format(c.median)}</td>
                       <td className="font-mono text-rose-300">{clp.format(c.max_price)}</td>
-                      <td className="truncate">{c.cheapest?.brand} {c.cheapest?.model}</td>
-                      <td className="truncate">{c.expensive?.brand} {c.expensive?.model}</td>
+                      <td className="truncate">{c.cheapest?.year} {c.cheapest?.brand} {c.cheapest?.model}{c.cheapest?.delta_pct != null ? ` · ${c.cheapest.delta_pct}%` : ""}</td>
+                      <td className="truncate">{c.expensive?.year} {c.expensive?.brand} {c.expensive?.model}{c.expensive?.delta_pct != null ? ` · ${c.expensive.delta_pct}%` : ""}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -413,8 +558,8 @@ export default function App() {
           </div>
         ) : null}
 
-        {tab === "avisos" ? (
-          <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
+        {seen.avisos ? (
+          <div hidden={tab !== "avisos"} className="grid gap-4 lg:grid-cols-[260px_1fr]">
             <aside className="h-fit space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4">
               <input
                 className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm"
@@ -459,7 +604,11 @@ export default function App() {
                   <button disabled={listings.page <= 1} onClick={() => setFilters((f) => ({ ...f, page: f.page - 1 }))} className="rounded-md border border-white/10 px-2 py-1 disabled:opacity-40">
                     Anterior
                   </button>
-                  <button onClick={() => setFilters((f) => ({ ...f, page: (Number(f.page) || 1) + 1 }))} className="rounded-md border border-white/10 px-2 py-1">
+                  <button
+                    disabled={(listings.page || 1) * (listings.limit || 24) >= (listings.total || 0)}
+                    onClick={() => setFilters((f) => ({ ...f, page: (Number(f.page) || 1) + 1 }))}
+                    className="rounded-md border border-white/10 px-2 py-1 disabled:opacity-40"
+                  >
                     Siguiente
                   </button>
                 </div>
@@ -505,6 +654,11 @@ export default function App() {
             {detail.market ? (
               <div className="mt-4 rounded-xl bg-white/5 p-3 text-sm">
                 Mediana comparable: {clp.format(detail.market.p50)} ({detail.market.n} avisos) · Δ {detail.delta_pct}%
+              </div>
+            ) : null}
+            {detailValuation?.retail ? (
+              <div className="mt-4">
+                <ValuationPanel valuation={detailValuation} />
               </div>
             ) : null}
             {detail.history?.length > 1 ? (

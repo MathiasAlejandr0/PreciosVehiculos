@@ -1,7 +1,18 @@
-export function parsePrice(value) {
+import { sanitizePrice } from "../../shared/cleanListing.js";
+
+export function pickListedPrice(text, floor = 800_000) {
+  const amounts = [...String(text || "").matchAll(/\$\s*([\d.\s]+)/g)]
+    .map((m) => Number(String(m[1]).replace(/[^\d]/g, "")))
+    .filter((n) => Number.isFinite(n) && n >= floor);
+  if (!amounts.length) return null;
+  return Math.max(...amounts);
+}
+
+export function parsePrice(value, category = "auto", title = "") {
   if (value == null) return null;
+  const hay = `${title || ""} ${typeof value === "string" ? value : ""}`;
   if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 0 ? Math.round(value) : null;
+    return sanitizePrice(value, category, hay, "", null);
   }
   const raw = String(value).replace(/\s/g, "").replace(/[$\u00a0]/g, "");
   if (!raw) return null;
@@ -9,8 +20,7 @@ export function parsePrice(value) {
   if (!digits) return null;
   const n = Number(digits);
   if (!Number.isFinite(n) || n <= 0) return null;
-  if (n < 100000) return n;
-  return n;
+  return sanitizePrice(n, category, hay);
 }
 
 export function parseKm(value) {
@@ -28,7 +38,7 @@ export function parseYear(value) {
   if (value == null) return null;
   if (typeof value === "number" && value >= 1970 && value <= 2028) return value;
   const text = String(value);
-  const match = text.match(/\b(19[8-9]\d|20[0-2]\d)\b/);
+  const match = text.match(/(?:^|[^\d])(19[8-9]\d|20[0-2]\d)(?:[^\d]|$)/);
   if (!match) return null;
   const year = Number(match[1]);
   return year >= 1970 && year <= 2028 ? year : null;
@@ -39,7 +49,7 @@ export function titleCase(value) {
   return String(value)
     .trim()
     .toLowerCase()
-    .replace(/\b([a-zñáéíóúü])([a-zñáéíóúü]*)/g, (_, a, b) => a.toUpperCase() + b)
+    .replace(/\b([a-zñáéíóúüë])([a-zñáéíóúüë]*)/g, (_, a, b) => a.toUpperCase() + b)
     .replace(/\b(Bmw|Vw|Mg|Gac|Byd|Ds|Ram)\b/g, (m) => m.toUpperCase())
     .replace(/\bMercedes Benz\b/i, "Mercedes-Benz")
     .replace(/\bLand Rover\b/i, "Land Rover")

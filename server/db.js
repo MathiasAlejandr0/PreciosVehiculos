@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { inferCategory, isJunkBrand, priceAllowed } from "../shared/cleanListing.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = join(__dirname, "..", "data");
@@ -75,6 +76,8 @@ CREATE INDEX IF NOT EXISTS idx_listings_category ON listings(category);
 CREATE INDEX IF NOT EXISTS idx_listings_region ON listings(region);
 CREATE INDEX IF NOT EXISTS idx_listings_active ON listings(is_active);
 CREATE INDEX IF NOT EXISTS idx_listings_fp ON listings(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_listings_cohort ON listings(brand, model, year, is_active);
+CREATE INDEX IF NOT EXISTS idx_listings_last_seen ON listings(last_seen);
 CREATE INDEX IF NOT EXISTS idx_history_listing ON price_history(listing_id, seen_at);
 `);
 }
@@ -135,7 +138,9 @@ export function upsertListings(rows) {
   try {
     for (const row of rows) {
       if (!row?.external_id || !row.source) continue;
-      if (!row.price || row.price < 200000 || row.price > 400000000) continue;
+      if (!row.brand || isJunkBrand(row.brand)) continue;
+      const category = inferCategory(row);
+      if (!priceAllowed(row.price, category)) continue;
       const id = listingId(row.source, row.external_id);
       const prev = selectPrice.get(id);
       upsertStmt.run({
@@ -187,4 +192,26 @@ export function upsertListings(rows) {
 export function countListings() {
   if (!db) return 0;
   return db.prepare("SELECT COUNT(*) AS n FROM listings WHERE is_active = 1").get().n;
+}
+
+const STALE_DAYS = Number(process.env.STALE_DAYS || 21);
+
+export function deactivateStaleListings(days = STALE_DAYS) {
+  if (!db) return { stale: 0, nobrand: 0 };
+  const cutoff = new Date(Date.now() - Math.max(3, days) * 86400000).toISOString();
+  const stale = db.prepare(
+    "UPDATE listings SET is_active = 0 WHERE is_active = 1 AND last_seen < ?"
+  ).run(cutoff);
+  const nobrand = db.prepare(
+    "UPDATE listings SET is_active = 0 WHERE is_active = 1 AND (brand IS NULL OR TRIM(brand) = '')"
+  ).run();
+  return { stale: stale.changes, nobrand: nobrand.changes, cutoff };
+}
+
+export function closeOrphanCrawls() {
+  if (!db) return 0;
+  const now = new Date().toISOString();
+  return db.prepare(
+    "UPDATE crawl_runs SET finished_at = ?, status = 'interrupted' WHERE status = 'running'"
+  ).run(now).changes;
 }

@@ -12,6 +12,25 @@ const PORT = Number(process.env.PORT || 8787);
 
 app.use(express.json({ limit: "1mb" }));
 
+const CRAWL_SECRET = process.env.CRAWL_SECRET || "";
+
+function isLocalRequest(req) {
+  const ip = req.socket?.remoteAddress || "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+function requireOps(req, res, next) {
+  const token = req.get("x-crawl-token") || req.query.token || req.body?.token;
+  if (CRAWL_SECRET) {
+    if (token !== CRAWL_SECRET) return res.status(401).json({ error: "No autorizado" });
+    return next();
+  }
+  if (!isLocalRequest(req)) {
+    return res.status(401).json({ error: "No autorizado: define CRAWL_SECRET o llama desde localhost" });
+  }
+  return next();
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, inventory: countListings(), time: new Date().toISOString() });
 });
@@ -39,6 +58,12 @@ app.get("/api/tasar", (req, res) => {
   res.json(tasar(req.query));
 });
 
+app.post("/api/tasar", (req, res) => {
+  const body = req.body || {};
+  if (!body.brand) return res.status(400).json({ error: "Falta marca" });
+  res.json(tasar(body));
+});
+
 app.get("/api/vehicle", (req, res) => {
   res.json(getVehicleReport(req.query));
 });
@@ -47,7 +72,7 @@ app.get("/api/crawl", (_req, res) => {
   res.json(getCrawlState());
 });
 
-app.post("/api/crawl", async (req, res) => {
+app.post("/api/crawl", requireOps, async (req, res) => {
   const mode = req.body?.mode || "quick";
   if (!["quick", "standard", "full"].includes(mode)) {
     return res.status(400).json({ error: "Modo inválido" });
@@ -59,7 +84,7 @@ app.post("/api/crawl", async (req, res) => {
   res.json({ ok: true, ...getCrawlState() });
 });
 
-app.get("/api/export.csv", (req, res) => {
+app.get("/api/export.csv", requireOps, (req, res) => {
   const { rows } = searchListings({ ...req.query, limit: 5000, page: 1 });
   const cols = [
     "source", "title", "brand", "model", "year", "mileage", "price", "region",
@@ -85,8 +110,8 @@ if (existsSync(dist)) {
 app.listen(PORT, () => {
   console.log(`PrecioAuto API en http://localhost:${PORT}`);
   const n = countListings();
-  if (n === 0) {
-    console.log("Inventario vacío: iniciando barrido rápido del mercado…");
+  if (n === 0 && process.env.AUTO_CRAWL === "1") {
+    console.log("Inventario vacío: iniciando barrido rápido (AUTO_CRAWL=1)…");
     startCrawl("quick").catch((err) => console.error(err));
   }
 });

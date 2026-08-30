@@ -11,7 +11,8 @@
     "build": "vite build --config web/vite.config.js",
     "start": "node server/index.js",
     "crawl": "node server/crawl-cli.js",
-    "snapshot": "node --input-type=module -e \"import { writeSnapshot } from './server/snapshot.js'; console.log(writeSnapshot());\""
+    "snapshot": "node --input-type=module -e \"import { writeSnapshot } from './server/snapshot.js'; console.log(writeSnapshot());\"",
+    "clean-data": "node server/clean-public.js"
   },
   "engines": {
     "node": ">=22"

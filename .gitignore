@@ -1,5 +1,6 @@
 node_modules/
 /data/
 web/dist
+web/public/data/*.json
 probe*.mjs
 .DS_Store

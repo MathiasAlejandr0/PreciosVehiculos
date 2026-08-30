@@ -2,53 +2,59 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { db } from "./db.js";
-import { getOverview, getFacets, decorate } from "./analytics.js";
+import { parseLocation, MARKETPLACES } from "./lib/geo.js";
+import { sanitizeListing, facetsFromRows } from "../shared/cleanListing.js";
+import { overviewFromRows } from "../shared/overview.js";
+import { attachPeerDeals } from "../shared/intelligence.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, "..", "web", "public", "data");
 
 function compact(row) {
-  const d = decorate(row);
   return {
-    id: d.id,
-    source: d.source,
-    url: d.url,
-    title: d.title,
-    brand: d.brand,
-    model: d.model,
-    version: d.version,
-    year: d.year,
-    mileage: d.mileage,
-    price: d.price,
-    category: d.category,
-    fuel: d.fuel,
-    transmission: d.transmission,
-    region: d.region,
-    city: d.city,
-    seller_type: d.seller_type,
-    image_url: d.image_url,
-    deal: d.deal,
-    delta_pct: d.delta_pct,
+    id: row.id,
+    source: row.source,
+    url: row.url,
+    title: row.title,
+    brand: row.brand,
+    model: row.model,
+    version: row.version,
+    year: row.year,
+    mileage: row.mileage,
+    price: row.price,
+    category: row.category,
+    fuel: row.fuel,
+    transmission: row.transmission,
+    region: row.region,
+    city: row.city,
+    seller_type: row.seller_type,
+    drivetrain: row.drivetrain,
+    image_url: row.image_url,
+    first_seen: row.first_seen,
+    last_seen: row.last_seen,
   };
 }
 
 export function writeSnapshot() {
   if (!db) return null;
   mkdirSync(OUT_DIR, { recursive: true });
-  const stats = getOverview();
-  const facets = getFacets();
   const listings = db
     .prepare(
       `SELECT * FROM listings WHERE is_active = 1 AND price > 0 ORDER BY last_seen DESC LIMIT 8000`
     )
     .all()
-    .map(compact);
+    .map(compact)
+    .map((row) => sanitizeListing(row, parseLocation))
+    .filter(Boolean);
+  const withDeals = attachPeerDeals(listings);
+  const facets = facetsFromRows(withDeals);
+  const stats = overviewFromRows(withDeals, { catalog: MARKETPLACES });
   const payload = {
     generatedAt: new Date().toISOString(),
     stats,
     facets,
   };
   writeFileSync(join(OUT_DIR, "stats.json"), JSON.stringify(payload));
-  writeFileSync(join(OUT_DIR, "listings.json"), JSON.stringify({ generatedAt: payload.generatedAt, rows: listings }));
+  writeFileSync(join(OUT_DIR, "listings.json"), JSON.stringify({ generatedAt: payload.generatedAt, rows: withDeals }));
   return { listings: listings.length, out: OUT_DIR };
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -12,8 +12,14 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { buildVehicleReport, parseVehicleQuery, suggestVehicles } from "../../shared/vehicleReport.js";
-import { Badge, Card, ChartTip, Field, Select, Stat, clp, num } from "./ui.jsx";
+import { buildVehicleReport, parseSmartQuery, suggestVehicles } from "../../shared/vehicleReport.js";
+import { uniqueOpportunities } from "../../shared/intelligence.js";
+import { facetsFromRows, matchesKind } from "../../shared/cleanListing.js";
+import { buildVehicleCatalog, generationsFor } from "../../shared/catalog.js";
+import { valueVehicle } from "../../shared/valuation.js";
+import { portalSearchLinks } from "../../shared/portals.js";
+import { Badge, Card, ChartTip, Field, Select, SOURCE_NAME, Stat, clp, num } from "./ui.jsx";
+import ValuationPanel, { RuleToggles } from "./ValuationPanel.jsx";
 
 function ExtremeCard({ title, row, tone }) {
   if (!row) {
@@ -32,8 +38,10 @@ function ExtremeCard({ title, row, tone }) {
         {row.year} {row.brand} {row.model}
       </div>
       <div className="mt-1 text-xs text-slate-400">
-        {row.city || row.region || "Chile"} · {row.source}
+        {row.city || row.region || "Chile"} · {SOURCE_NAME[row.source] || row.source}
         {row.mileage != null ? ` · ${num.format(row.mileage)} km` : ""}
+        {row.peer_n ? ` · ${row.peer_n} pares` : ""}
+        {row.delta_pct != null ? ` · ${row.delta_pct > 0 ? "+" : ""}${row.delta_pct}% vs mediana` : ""}
       </div>
     </>
   );
@@ -47,24 +55,60 @@ function ExtremeCard({ title, row, tone }) {
   );
 }
 
-export default function SearchHome({ facets, catalog, onOpen }) {
+function SearchHome({ facets, catalog, onOpen }) {
   const [text, setText] = useState("");
   const [brand, setBrand] = useState("");
   const [model, setModel] = useState("");
   const [year, setYear] = useState("");
   const [mileage, setMileage] = useState("");
+  const [version, setVersion] = useState("");
+  const [fuel, setFuel] = useState("");
+  const [transmission, setTransmission] = useState("");
+  const [rules, setRules] = useState({});
+  const [kind, setKind] = useState("livianos");
   const [openSug, setOpenSug] = useState(false);
   const [report, setReport] = useState(null);
   const [error, setError] = useState("");
   const boxRef = useRef(null);
   const loadedUrl = useRef(false);
 
-  const suggestions = useMemo(() => suggestVehicles(facets, text || `${brand} ${model}`), [facets, text, brand, model]);
-  const modelsForBrand = useMemo(
-    () => (facets.models || []).filter((m) => !brand || m.brand === brand),
-    [facets.models, brand]
+  const scoped = useMemo(
+    () => (catalog || []).filter((r) => matchesKind(r, kind)),
+    [catalog, kind]
   );
-  const popular = useMemo(() => suggestVehicles(facets, ""), [facets]);
+  const localFacets = useMemo(() => (scoped.length ? facetsFromRows(scoped) : facets), [scoped, facets]);
+  const suggestions = useMemo(() => suggestVehicles(localFacets, text || `${brand} ${model}`), [localFacets, text, brand, model]);
+  const modelsForBrand = useMemo(
+    () => (localFacets.models || []).filter((m) => !brand || m.brand === brand),
+    [localFacets.models, brand]
+  );
+  const popular = useMemo(() => suggestVehicles(localFacets, ""), [localFacets]);
+  const liveOpps = useMemo(() => uniqueOpportunities(scoped, { limit: 8, minPeers: 4 }), [scoped]);
+  const versionsForModel = useMemo(
+    () =>
+      (localFacets.versions || [])
+        .filter((v) => (!brand || v.brand === brand) && (!model || v.model === model))
+        .slice(0, 40),
+    [localFacets.versions, brand, model]
+  );
+  const vehicleTree = useMemo(() => (catalog?.length ? buildVehicleCatalog(catalog) : null), [catalog]);
+  const liveValuation = useMemo(() => {
+    if (!catalog?.length || !report) return report?.valuation || null;
+    return valueVehicle(scoped.length ? scoped : catalog, {
+      ...report.query,
+      version,
+      fuel,
+      transmission,
+      mileage: mileage || report.query?.mileage,
+      rules,
+      kind: report.query?.kind || kind,
+      year: report.query?.year || report.peer_year,
+    });
+  }, [catalog, scoped, report, version, fuel, transmission, mileage, rules, kind]);
+  const generation = useMemo(
+    () => generationsFor(vehicleTree, report?.query?.brand || brand, report?.query?.model || model),
+    [vehicleTree, report, brand, model]
+  );
 
   useEffect(() => {
     if (loadedUrl.current || !catalog?.length) return;
@@ -89,14 +133,26 @@ export default function SearchHome({ facets, catalog, onOpen }) {
       setError("Aún estamos cargando el catálogo de avisos.");
       return;
     }
-    const parsed = parseVehicleQuery(next.q || text, facets);
+    const parsed = parseSmartQuery(next.q || text, localFacets);
     const query = {
       q: next.q ?? text,
       brand: next.brand || parsed.brand || brand,
       model: next.model || parsed.model || model,
       year: next.year || parsed.year || year,
+      yearMin: parsed.yearMin,
+      yearMax: parsed.yearMax,
+      budgetMax: parsed.budgetMax,
+      kmMax: parsed.kmMax,
+      category: parsed.category,
+      intent: parsed.intent,
       mileage: next.mileage || mileage,
-      facets,
+      version: next.version ?? version,
+      fuel: next.fuel ?? fuel,
+      transmission: next.transmission ?? transmission,
+      rules: next.rules || rules,
+      kind: next.kind || kind,
+      facets: localFacets,
+      catalog: vehicleTree,
     };
     if (parsed.brand && !brand) setBrand(parsed.brand);
     if (parsed.model && !model) setModel(parsed.model);
@@ -108,7 +164,9 @@ export default function SearchHome({ facets, catalog, onOpen }) {
     const url = new URL(window.location.href);
     if (label) url.searchParams.set("q", label);
     else url.searchParams.delete("q");
-    window.history.replaceState({}, "", url);
+    const nextPath = `${url.pathname}${url.search}${url.hash}`;
+    const now = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextPath !== now) window.history.replaceState({}, "", nextPath);
     setOpenSug(false);
   }
 
@@ -127,25 +185,24 @@ export default function SearchHome({ facets, catalog, onOpen }) {
   return (
     <div className="space-y-6">
       <section className="overflow-hidden rounded-3xl border border-amber-400/20 bg-[radial-gradient(circle_at_top_right,_rgba(251,191,36,0.12),_transparent_42%),linear-gradient(180deg,_#0d1826,_#08111c)] p-6 sm:p-8">
-        <p className="text-xs uppercase tracking-[0.2em] text-amber-300">Consulta de mercado</p>
+        <p className="text-xs uppercase tracking-[0.2em] text-amber-300">Consulta inteligente</p>
         <h1 className="mt-2 max-w-3xl text-3xl font-semibold tracking-tight sm:text-4xl">
           Pon el auto que buscas y te mostramos cuánto vale hoy en Chile
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-slate-400">
-          Más barato, más caro, en qué ciudad está, banda de precio justo y cómo cambia según año y kilometraje — con avisos reales.
+          Tres precios (retoma, publicar y techo) sobre avisos públicos. Ask no es transferencia. Entiende “SUV hasta 15 millones 2018-2021”.
         </p>
 
         <form onSubmit={onSubmit} className="mt-6 space-y-3">
           <div ref={boxRef} className="relative">
             <input
-              autoFocus
               value={text}
               onChange={(e) => {
                 setText(e.target.value);
                 setOpenSug(true);
               }}
               onFocus={() => setOpenSug(true)}
-              placeholder="Ej. Toyota Yaris 2018, Ranger 2022, Tucson…"
+              placeholder="Ej. Toyota Yaris 2018, SUV hasta 15 millones 2019-2021, oportunidad Ranger…"
               className="w-full rounded-2xl border border-white/15 bg-black/40 px-5 py-4 text-lg text-white outline-none ring-amber-400/0 placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/30"
             />
             {openSug && suggestions.length ? (
@@ -166,7 +223,25 @@ export default function SearchHome({ facets, catalog, onOpen }) {
               </div>
             ) : null}
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+            <Select
+              label="Tipo"
+              value={kind}
+              onChange={(v) => {
+                setKind(v);
+                setBrand("");
+                setModel("");
+                setReport(null);
+                setError("");
+              }}
+              options={[
+                { value: "livianos", label: "Autos y SUV" },
+                { value: "moto", label: "Motos" },
+                { value: "camion", label: "Camiones" },
+                { value: "all", label: "Todo el inventario" },
+              ]}
+              allowEmpty={false}
+            />
             <Select
               label="Marca"
               value={brand}
@@ -175,7 +250,7 @@ export default function SearchHome({ facets, catalog, onOpen }) {
                 setModel("");
                 setText(v);
               }}
-              options={facets.brands || []}
+              options={localFacets.brands || []}
               placeholder="Cualquiera"
             />
             <Select
@@ -194,7 +269,36 @@ export default function SearchHome({ facets, catalog, onOpen }) {
               Ver precios de mercado
             </button>
           </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Select
+              label="Versión / motor"
+              value={version}
+              onChange={setVersion}
+              options={versionsForModel}
+              placeholder="Cualquiera"
+            />
+            <Select
+              label="Combustible"
+              value={fuel}
+              onChange={setFuel}
+              options={localFacets.fuels || []}
+              placeholder="Cualquiera"
+            />
+            <Select
+              label="Transmisión"
+              value={transmission}
+              onChange={setTransmission}
+              options={localFacets.transmissions || []}
+              placeholder="Cualquiera"
+            />
+          </div>
+          <div>
+            <div className="mb-2 text-xs text-slate-400">Estado del auto (ajusta la tasación)</div>
+            <RuleToggles rules={rules} onChange={setRules} />
+          </div>
         </form>
+
+        <PortalChips query={{ brand, model, year }} />
 
         {!report && popular.length ? (
           <div className="mt-5 flex flex-wrap gap-2">
@@ -220,25 +324,110 @@ export default function SearchHome({ facets, catalog, onOpen }) {
           <div>
             <h2 className="text-2xl font-semibold">{report.label}</h2>
             <p className="text-sm text-slate-400">
-              {num.format(report.sample)} avisos comparables · {report.scope}
+              {num.format(report.sample)} avisos · {report.scope}
             </p>
+            {report.insight ? (
+              <p className="mt-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
+                {report.insight}
+              </p>
+            ) : null}
+            {report.sample < 8 ? (
+              <p className="mt-2 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                Muestra chica ({report.sample} avisos): toma la banda de precio con reserva.
+              </p>
+            ) : null}
           </div>
 
+          <ValuationPanel valuation={liveValuation} generation={generation || report.generation} />
+
+          {report.recommendations?.length ? (
+            <section>
+              <h3 className="mb-3 text-sm font-semibold">Recomendación de compra</h3>
+              <div className="grid gap-3 lg:grid-cols-2">
+                {report.recommendations.slice(0, 2).map((row) => (
+                  <button
+                    key={row.id}
+                    type="button"
+                    onClick={() => onOpen(row)}
+                    className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-left hover:border-emerald-400/50"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-emerald-300">Mejor trato vs su año</div>
+                        <div className="mt-1 text-lg font-semibold text-white">
+                          {row.year} {row.brand} {row.model}
+                        </div>
+                        <p className="mt-1 text-xs text-slate-300">{row.reason || (row.reasons || []).join(" · ")}</p>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-mono text-xl font-semibold text-emerald-300">{clp.format(row.price)}</div>
+                        {row.delta_pct != null ? (
+                          <div className="text-xs text-emerald-200">{row.delta_pct}% vs mediana</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat label="Más barato" value={clp.format(report.stats.min)} hint={report.cheapest ? `${report.cheapest.city || report.cheapest.region || "Chile"}` : ""} />
-            <Stat label="Comprar cerca de" value={report.suggested_buy ? clp.format(report.suggested_buy) : "—"} hint="Zona P25 del mercado" />
-            <Stat label="Precio justo (mediana)" value={clp.format(report.stats.p50)} hint="La mitad está bajo este valor" />
-            <Stat label="Más caro" value={clp.format(report.stats.max)} hint={report.expensive ? `${report.expensive.city || report.expensive.region || "Chile"}` : ""} />
+            <Stat
+              label={`Más barato ${report.peer_year ? report.peer_year : ""}`}
+              value={report.stats?.min ? clp.format(report.stats.min) : "—"}
+              hint={report.cheapest ? `${report.peer_n || report.sample} pares del mismo año · ${report.cheapest.city || report.cheapest.region || "Chile"}` : ""}
+            />
+            <Stat
+              label="Retoma / compra"
+              value={liveValuation?.buy ? clp.format(liveValuation.buy) : report.suggested_buy ? clp.format(report.suggested_buy) : "—"}
+              hint="Techo para comprar, no el ask publicado"
+            />
+            <Stat
+              label="Publicar (retail)"
+              value={liveValuation?.retail ? clp.format(liveValuation.retail) : report.stats?.p50 ? clp.format(report.stats.p50) : "—"}
+              hint="Mediana de pares + km y reglas"
+            />
+            <Stat
+              label={`Más caro ${report.peer_year ? report.peer_year : ""}`}
+              value={report.stats?.max ? clp.format(report.stats.max) : "—"}
+              hint={report.expensive ? `${report.peer_n || report.sample} pares del mismo año · ${report.expensive.city || report.expensive.region || "Chile"}` : ""}
+            />
           </section>
 
           <section className="grid gap-3 lg:grid-cols-2">
-            <ExtremeCard title="El más barato ahora" row={report.cheapest} tone="text-emerald-300" />
-            <ExtremeCard title="El más caro ahora" row={report.expensive} tone="text-rose-300" />
+            <ExtremeCard
+              title={report.peer_year ? `Más barato del año ${report.peer_year}` : "El más barato del mismo recorte"}
+              row={report.cheapest}
+              tone="text-emerald-300"
+            />
+            <ExtremeCard
+              title={report.peer_year ? `Más caro del año ${report.peer_year}` : "El más caro del mismo recorte"}
+              row={report.expensive}
+              tone="text-rose-300"
+            />
           </section>
 
           <section className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
-            Banda de mercado: {clp.format(report.band.low)} — {clp.format(report.band.mid)} — {clp.format(report.band.high)}
-            {report.suggested_list ? ` · Si publicas, cerca de ${clp.format(report.suggested_list)}` : ""}
+            Banda de mercado (P25–P50–P75): {clp.format(report.band.low)} — {clp.format(report.band.mid)} — {clp.format(report.band.high)}
+            {liveValuation?.retail ? ` · Publicar cerca de ${clp.format(liveValuation.retail)}` : report.suggested_list ? ` · Si publicas, cerca de ${clp.format(report.suggested_list)}` : ""}
+            {liveValuation?.ceiling ? ` · Techo de riesgo ${clp.format(liveValuation.ceiling)}` : ""}
+          </section>
+
+          <section className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
+            <div className="mb-2 font-semibold text-white">Buscar el mismo auto en otros portales</div>
+            <p className="mb-3 text-xs text-slate-400">
+              Kavak, Clicar y Checkeados venden usados inspeccionados. auto.cl cotiza y financia. Facebook suma particulares.
+            </p>
+            <PortalChips
+              className=""
+              hint=""
+              query={{
+                brand: report.query?.brand,
+                model: report.query?.model,
+                year: report.query?.year,
+              }}
+            />
           </section>
 
           <section className="grid gap-4 lg:grid-cols-2">
@@ -338,7 +527,7 @@ export default function SearchHome({ facets, catalog, onOpen }) {
 
           {report.byCity.length ? (
             <section className="overflow-x-auto rounded-2xl border border-white/10 bg-white/5 p-4">
-              <h3 className="mb-3 text-sm font-semibold">Dónde está más barato y más caro</h3>
+              <h3 className="mb-3 text-sm font-semibold">Dónde está más barato y más caro (mismo año)</h3>
               <table className="w-full min-w-[720px] text-left text-sm">
                 <thead className="text-xs uppercase text-slate-400">
                   <tr>
@@ -376,10 +565,16 @@ export default function SearchHome({ facets, catalog, onOpen }) {
 
           {report.opportunities.length ? (
             <section>
-              <h3 className="mb-3 text-sm font-semibold">Oportunidades de este modelo (bajo la mediana)</h3>
+              <h3 className="mb-1 text-sm font-semibold">Oportunidades únicas</h3>
+              <p className="mb-3 text-xs text-slate-400">
+                Mismo modelo y año, al menos 4 pares, 12% o más bajo la mediana y kilometraje razonable.
+              </p>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {report.opportunities.map((row) => (
-                  <Card key={row.id} row={row} onOpen={onOpen} />
+                  <div key={row.id} className="space-y-2">
+                    <Card row={row} onOpen={onOpen} />
+                    {row.reason ? <p className="px-1 text-[11px] text-slate-400">{row.reason}</p> : null}
+                  </div>
                 ))}
               </div>
             </section>
@@ -399,9 +594,52 @@ export default function SearchHome({ facets, catalog, onOpen }) {
         </div>
       ) : null}
 
+      {!report && liveOpps.length ? (
+        <section>
+          <h3 className="mb-1 text-sm font-semibold">Oportunidades únicas ahora</h3>
+          <p className="mb-3 text-xs text-slate-400">
+            Calculadas al instante contra el mismo modelo y año. Escribe un auto arriba para profundizar.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {liveOpps.map((row) => (
+              <div key={row.id} className="space-y-2">
+                <Card row={row} onOpen={onOpen} />
+                {row.reason ? <p className="px-1 text-[11px] text-slate-400">{row.reason}</p> : null}
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {!report && !catalog?.length ? (
         <div className="py-12 text-center text-slate-400">Cargando catálogo para consultar al instante…</div>
       ) : null}
+    </div>
+  );
+}
+
+export default memo(SearchHome);
+
+function PortalChips({ query, className = "mt-4", hint = "Mismos filtros, otros portales." }) {
+  return (
+    <div className={`${className} flex flex-wrap items-center gap-2 text-xs`}>
+      {portalSearchLinks(query).map((p) => (
+        <a
+          key={p.id}
+          href={p.url}
+          target="_blank"
+          rel="noreferrer"
+          title={p.hint}
+          className={`rounded-full px-3 py-1 font-semibold hover:opacity-90 ${
+            p.id === "facebook"
+              ? "bg-[#1877f2] text-white"
+              : "border border-white/15 bg-white/5 text-slate-200 hover:border-amber-400/40"
+          }`}
+        >
+          {p.name}
+        </a>
+      ))}
+      {hint ? <span className="text-slate-500">{hint}</span> : null}
     </div>
   );
 }
@@ -417,7 +655,7 @@ function MiniList({ title, rows }) {
       {rows?.length ? (
         rows.map((r) => (
           <div key={r.name} className="mb-2 flex justify-between text-sm">
-            <span className="truncate pr-3 capitalize">{r.name}</span>
+            <span className="truncate pr-3 capitalize">{SOURCE_NAME[r.name] || r.name}</span>
             <span className="font-mono text-slate-400">
               {num.format(r.n)} · {clp.format(r.median)}
             </span>

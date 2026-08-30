@@ -6,6 +6,18 @@ export const clp = new Intl.NumberFormat("es-CL", {
 
 export const num = new Intl.NumberFormat("es-CL");
 
+export const SOURCE_NAME = {
+  facebook: "Facebook",
+  mercadolibre: "Mercado Libre",
+  chileautos: "Chileautos",
+  yapo: "Yapo",
+  autocosmos: "Autocosmos",
+  kavak: "Kavak",
+  clicar: "Clicar",
+  checkeados: "Checkeados",
+  autocl: "auto.cl",
+};
+
 export const TONE = {
   emerald: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",
   lime: "bg-lime-500/15 text-lime-300 ring-lime-500/30",
@@ -49,7 +61,7 @@ export function Card({ row, onOpen }) {
           <Badge deal={row.deal} />
         </div>
         <div className="absolute bottom-2 right-2 rounded-md bg-black/60 px-2 py-0.5 text-[11px] uppercase tracking-wide text-slate-200">
-          {row.source}
+          {SOURCE_NAME[row.source] || row.source}
         </div>
       </div>
       <div className="flex flex-1 flex-col gap-1 p-3">
@@ -58,7 +70,14 @@ export function Card({ row, onOpen }) {
         </div>
         <div className="text-xs text-slate-400 line-clamp-1">{row.version || row.title}</div>
         <div className="mt-auto flex items-end justify-between pt-2">
-          <div className="font-mono text-lg font-semibold text-amber-300">{row.price ? clp.format(row.price) : "—"}</div>
+          <div>
+            <div className="font-mono text-lg font-semibold text-amber-300">{row.price ? clp.format(row.price) : "—"}</div>
+            {row.delta_pct != null ? (
+              <div className={`text-[11px] ${row.delta_pct <= -4 ? "text-emerald-300" : row.delta_pct >= 8 ? "text-rose-300" : "text-slate-500"}`}>
+                {row.delta_pct > 0 ? "+" : ""}{row.delta_pct}% vs {row.year || "su año"}
+              </div>
+            ) : null}
+          </div>
           <div className="text-right text-[11px] text-slate-400">
             {row.mileage != null ? `${num.format(row.mileage)} km` : "km n/d"}
             <div>{row.city || row.region || "Chile"}</div>
@@ -83,7 +102,7 @@ export function ChartTip({ active, payload, label, money }) {
   );
 }
 
-export function Select({ label, value, onChange, options, placeholder = "Todas" }) {
+export function Select({ label, value, onChange, options, placeholder = "Todas", allowEmpty = true }) {
   return (
     <label className="block text-xs text-slate-400">
       {label}
@@ -92,10 +111,10 @@ export function Select({ label, value, onChange, options, placeholder = "Todas" 
         value={value}
         onChange={(e) => onChange(e.target.value)}
       >
-        <option value="">{placeholder}</option>
+        {allowEmpty ? <option value="">{placeholder}</option> : null}
         {options.map((o) => (
           <option key={`${o.brand || ""}-${o.value}`} value={o.value}>
-            {o.value} {o.n != null ? `(${o.n})` : ""}
+            {o.label || o.value} {o.n != null ? `(${o.n})` : ""}
           </option>
         ))}
       </select>
