@@ -1,5 +1,5 @@
 import { parseLocation } from "../server/lib/geo.js";
-import { sanitizeListing, matchesKind } from "./cleanListing.js";
+import { sanitizeListing, matchesKind, sameBrand, sameModel } from "./cleanListing.js";
 import {
   attachPeerDeals,
   comparableExtremes,
@@ -114,22 +114,28 @@ export function parseVehicleQuery(text, facets = {}) {
   if (!brand && model) {
     const hits = (facets.models || []).filter((m) => {
       const fm = fold(m.value);
-      return fm === model || fm.startsWith(`${model} `) || model.startsWith(fm);
+      return fm === model || model.startsWith(`${fm} `) || fm.startsWith(model);
     });
     const unique = [...new Set(hits.map((h) => h.brand).filter(Boolean))];
     if (unique.length === 1) {
       brand = unique[0];
-      const exact = hits.find((h) => fold(h.value) === model) || hits[0];
-      if (exact) model = exact.value;
     }
   }
 
   if (model) {
-    const hit = (facets.models || []).find((m) => {
-      if (brand && m.brand && fold(m.brand) !== fold(brand)) return false;
-      return fold(m.value) === fold(model);
-    });
-    if (hit) model = hit.value;
+    const pool = (facets.models || []).filter((m) => !brand || fold(m.brand) === fold(brand));
+    const want = fold(model);
+    const ranked = pool
+      .filter((m) => {
+        const fm = fold(m.value);
+        if (!fm) return false;
+        if (fm === want) return true;
+        if (want.startsWith(`${fm} `) || fm.startsWith(`${want} `)) return true;
+        const parts = fm.split(" ");
+        return parts.every((t) => t.length < 2 || want.includes(t));
+      })
+      .sort((a, b) => fold(b.value).length - fold(a.value).length);
+    if (ranked[0]) model = ranked[0].value;
   }
 
   return {
@@ -153,23 +159,12 @@ export function parseSmartQuery(text, facets = {}) {
 
 function modelMatches(row, wanted) {
   if (!wanted) return true;
-  const fm = fold(wanted);
-  const rm = fold(row.model);
-  const rt = fold(row.title);
-  const rv = fold(row.version);
-  if (!fm) return true;
-  if (rm === fm || rt === fm) return true;
-  if (rm.startsWith(fm) || (fm.startsWith(rm) && rm.length >= 3)) return true;
-  if (rm.includes(fm) || fm.includes(rm) && rm.length >= 3) return true;
-  const wt = tokens(wanted);
-  const hay = `${rm} ${rt} ${rv}`;
-  return wt.every((t) => t.length < 2 || hay.includes(t));
+  return sameModel(row.model, wanted);
 }
 
 function brandMatches(row, wanted) {
   if (!wanted) return true;
-  const fb = fold(wanted);
-  return fold(row.brand) === fb || fold(row.title).startsWith(fb);
+  return sameBrand(row.brand, wanted);
 }
 
 export function matchListings(rows, query = {}) {
@@ -199,24 +194,8 @@ export function matchListings(rows, query = {}) {
     matched = matched.filter((r) => r.year >= lo && r.year <= hi);
     scope = `años ${lo}–${hi}`;
   } else if (year) {
-    const exact = matched.filter((r) => r.year === year);
-    const near = matched.filter((r) => r.year && Math.abs(r.year - year) <= 1);
-    if (exact.length >= 3) {
-      matched = exact;
-      scope = `año ${year}`;
-    } else if (near.length >= 3) {
-      matched = near;
-      scope = `año ${year} ± 1`;
-    } else if (exact.length) {
-      matched = exact;
-      scope = `año ${year} (pocos avisos)`;
-    } else if (near.length) {
-      matched = near;
-      scope = `año ${year} ± 1 (pocos avisos)`;
-    } else {
-      matched = [];
-      scope = `año ${year} (sin avisos)`;
-    }
+    matched = matched.filter((r) => r.year === year);
+    scope = matched.length ? `año ${year}` : `año ${year} (sin avisos)`;
   }
   const kmMax = query.kmMax ? Number(query.kmMax) : null;
   if (kmMax && Number.isFinite(kmMax) && kmMax > 0 && matched.length) {
@@ -401,7 +380,7 @@ export function buildVehicleReport(allRows, query = {}) {
   const used = kmStats || peerStats;
   const valuation = valueVehicle(allRows, {
     ...parsed,
-    year: parsed.year || extremes.year,
+    year: parsed.year,
   });
   const generation = query.catalog ? generationsFor(query.catalog, parsed.brand, parsed.model) : null;
   const yearLabel = extremes.year ? `año ${extremes.year}` : "mismo modelo";

@@ -6,8 +6,15 @@ const TONE = {
   baja: "bg-rose-500/15 text-rose-200 ring-rose-500/30",
 };
 
-export default function ValuationPanel({ valuation, generation }) {
-  if (!valuation?.retail) return null;
+export default function ValuationPanel({ valuation, generation, compact }) {
+  if (!valuation?.retail) {
+    if (!valuation?.message) return null;
+    return (
+      <section className="rounded-2xl border border-amber-400/20 bg-amber-400/5 px-4 py-3 text-sm text-amber-100">
+        {valuation.message}
+      </section>
+    );
+  }
   const c = valuation.confidence || {};
   return (
     <section className="space-y-3">
@@ -24,10 +31,17 @@ export default function ValuationPanel({ valuation, generation }) {
           : ""}
       </p>
       <div className="grid gap-3 sm:grid-cols-3">
-        <Stat label="Si compras / retoma" value={clp.format(valuation.buy)} hint="No es el ask: es lo que conviene pagar" />
-        <Stat label="Si publicas" value={clp.format(valuation.retail)} hint="Precio pedido de mercado, ajustado por km y reglas" />
-        <Stat label="Techo de riesgo" value={clp.format(valuation.ceiling)} hint="No pases de este valor" />
+        <Stat label="Retoma / si compras" value={clp.format(valuation.buy)} hint="Lo que conviene pagar" />
+        <Stat label="Precio de mercado" value={clp.format(valuation.retail)} hint="Mediana de ese mismo auto" />
+        <Stat label="Techo" value={clp.format(valuation.ceiling)} hint="No pases de este valor" />
       </div>
+      {compact ? (
+        <p className="text-xs text-slate-500">
+          {c.notes?.join(" · ")}
+          {valuation.close_est ? ` · Cierre estimado ${clp.format(valuation.close_est)}` : ""}
+        </p>
+      ) : (
+      <>
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
           <div className="text-xs uppercase tracking-wide text-slate-400">Cierre estimado</div>
@@ -52,6 +66,8 @@ export default function ValuationPanel({ valuation, generation }) {
         {c.notes?.length ? ` · ${c.notes.join(" · ")}` : ""}
         {valuation.rules_applied?.length ? ` · Reglas: ${valuation.rules_applied.join(", ")}` : ""}
       </div>
+      </>
+      )}
     </section>
   );
 }

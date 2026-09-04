@@ -13,8 +13,7 @@ import {
   YAxis,
 } from "recharts";
 import { buildVehicleReport, parseSmartQuery, suggestVehicles } from "../../shared/vehicleReport.js";
-import { uniqueOpportunities } from "../../shared/intelligence.js";
-import { facetsFromRows, matchesKind } from "../../shared/cleanListing.js";
+import { facetsFromRows, matchesKind, sameBrand, sameModel } from "../../shared/cleanListing.js";
 import { buildVehicleCatalog, generationsFor } from "../../shared/catalog.js";
 import { valueVehicle } from "../../shared/valuation.js";
 import { portalSearchLinks } from "../../shared/portals.js";
@@ -67,6 +66,8 @@ function SearchHome({ facets, catalog, onOpen }) {
   const [rules, setRules] = useState({});
   const [kind, setKind] = useState("livianos");
   const [openSug, setOpenSug] = useState(false);
+  const [moreFilters, setMoreFilters] = useState(false);
+  const [showAvisos, setShowAvisos] = useState(false);
   const [report, setReport] = useState(null);
   const [error, setError] = useState("");
   const boxRef = useRef(null);
@@ -82,15 +83,6 @@ function SearchHome({ facets, catalog, onOpen }) {
     () => (localFacets.models || []).filter((m) => !brand || m.brand === brand),
     [localFacets.models, brand]
   );
-  const popular = useMemo(() => suggestVehicles(localFacets, ""), [localFacets]);
-  const liveOpps = useMemo(() => uniqueOpportunities(scoped, { limit: 8, minPeers: 4 }), [scoped]);
-  const versionsForModel = useMemo(
-    () =>
-      (localFacets.versions || [])
-        .filter((v) => (!brand || v.brand === brand) && (!model || v.model === model))
-        .slice(0, 40),
-    [localFacets.versions, brand, model]
-  );
   const vehicleTree = useMemo(() => (catalog?.length ? buildVehicleCatalog(catalog) : null), [catalog]);
   const liveValuation = useMemo(() => {
     if (!catalog?.length || !report) return report?.valuation || null;
@@ -102,13 +94,25 @@ function SearchHome({ facets, catalog, onOpen }) {
       mileage: mileage || report.query?.mileage,
       rules,
       kind: report.query?.kind || kind,
-      year: report.query?.year || report.peer_year,
+      year: report.query?.year,
     });
   }, [catalog, scoped, report, version, fuel, transmission, mileage, rules, kind]);
   const generation = useMemo(
     () => generationsFor(vehicleTree, report?.query?.brand || brand, report?.query?.model || model),
     [vehicleTree, report, brand, model]
   );
+  const otherYears = useMemo(() => {
+    if (!report || report.stats || !scoped.length) return [];
+    const b = report.query?.brand;
+    const m = report.query?.model;
+    if (!b || !m) return [];
+    const counts = new Map();
+    for (const row of scoped) {
+      if (!row.year || !sameBrand(row.brand, b) || !sameModel(row.model, m)) continue;
+      counts.set(row.year, (counts.get(row.year) || 0) + 1);
+    }
+    return [...counts.entries()].sort((a, c) => c[0] - a[0]).slice(0, 8);
+  }, [report, scoped]);
 
   useEffect(() => {
     if (loadedUrl.current || !catalog?.length) return;
@@ -159,7 +163,8 @@ function SearchHome({ facets, catalog, onOpen }) {
     if (parsed.year && !year) setYear(String(parsed.year));
     const built = buildVehicleReport(catalog, query);
     setReport(built);
-    setError(built.sample ? "" : "No encontramos avisos para esa búsqueda. Prueba otra marca o quita el año.");
+    setShowAvisos(false);
+    setError(built.sample ? "" : "No hay avisos de ese mismo modelo y año. No mezclamos otros autos.");
     const label = [query.brand, query.model, query.year].filter(Boolean).join(" ") || query.q;
     const url = new URL(window.location.href);
     if (label) url.searchParams.set("q", label);
@@ -183,14 +188,11 @@ function SearchHome({ facets, catalog, onOpen }) {
   }
 
   return (
-    <div className="space-y-6">
-      <section className="overflow-hidden rounded-3xl border border-amber-400/20 bg-[radial-gradient(circle_at_top_right,_rgba(251,191,36,0.12),_transparent_42%),linear-gradient(180deg,_#0d1826,_#08111c)] p-6 sm:p-8">
-        <p className="text-xs uppercase tracking-[0.2em] text-amber-300">Consulta inteligente</p>
-        <h1 className="mt-2 max-w-3xl text-3xl font-semibold tracking-tight sm:text-4xl">
-          Pon el auto que buscas y te mostramos cuánto vale hoy en Chile
-        </h1>
-        <p className="mt-2 max-w-2xl text-sm text-slate-400">
-          Tres precios (retoma, publicar y techo) sobre avisos públicos. Ask no es transferencia. Entiende “SUV hasta 15 millones 2018-2021”.
+    <div className="mx-auto max-w-3xl space-y-5">
+      <section className="rounded-3xl border border-white/10 bg-[#0d1826] p-6 sm:p-8">
+        <h1 className="text-3xl font-semibold tracking-tight">Tasar un auto</h1>
+        <p className="mt-2 text-sm text-slate-400">
+          Escribe marca, modelo y año. Ejemplo: <span className="text-slate-200">Kia Cerato Koup 2015</span>
         </p>
 
         <form onSubmit={onSubmit} className="mt-6 space-y-3">
@@ -202,8 +204,8 @@ function SearchHome({ facets, catalog, onOpen }) {
                 setOpenSug(true);
               }}
               onFocus={() => setOpenSug(true)}
-              placeholder="Ej. Toyota Yaris 2018, SUV hasta 15 millones 2019-2021, oportunidad Ranger…"
-              className="w-full rounded-2xl border border-white/15 bg-black/40 px-5 py-4 text-lg text-white outline-none ring-amber-400/0 placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/30"
+              placeholder="Kia Cerato Koup 2015"
+              className="w-full rounded-2xl border border-white/15 bg-black/40 px-5 py-4 text-lg text-white outline-none placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/30"
             />
             {openSug && suggestions.length ? (
               <div className="absolute z-10 mt-2 w-full overflow-hidden rounded-xl border border-white/10 bg-[#0d1826] shadow-2xl">
@@ -223,191 +225,139 @@ function SearchHome({ facets, catalog, onOpen }) {
               </div>
             ) : null}
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-            <Select
-              label="Tipo"
-              value={kind}
-              onChange={(v) => {
-                setKind(v);
-                setBrand("");
-                setModel("");
-                setReport(null);
-                setError("");
-              }}
-              options={[
-                { value: "livianos", label: "Autos y SUV" },
-                { value: "moto", label: "Motos" },
-                { value: "camion", label: "Camiones" },
-                { value: "all", label: "Todo el inventario" },
-              ]}
-              allowEmpty={false}
-            />
-            <Select
-              label="Marca"
-              value={brand}
-              onChange={(v) => {
-                setBrand(v);
-                setModel("");
-                setText(v);
-              }}
-              options={localFacets.brands || []}
-              placeholder="Cualquiera"
-            />
-            <Select
-              label="Modelo"
-              value={model}
-              onChange={(v) => {
-                setModel(v);
-                setText([brand, v].filter(Boolean).join(" "));
-              }}
-              options={modelsForBrand}
-              placeholder="Cualquiera"
-            />
-            <Field label="Año" value={year} onChange={setYear} placeholder="2018" />
-            <Field label="Kilometraje (opcional)" value={mileage} onChange={setMileage} placeholder="80000" />
-            <button className="mt-5 rounded-xl bg-amber-400 px-4 py-2 text-sm font-semibold text-black hover:bg-amber-300">
-              Ver precios de mercado
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="w-36">
+              <Field label="Kilómetros (opcional)" value={mileage} onChange={setMileage} placeholder="80000" />
+            </div>
+            <button className="rounded-xl bg-amber-400 px-5 py-2.5 text-sm font-semibold text-black hover:bg-amber-300">
+              Tasar
+            </button>
+            <button
+              type="button"
+              onClick={() => setMoreFilters((v) => !v)}
+              className="text-xs text-slate-400 underline-offset-2 hover:text-white hover:underline"
+            >
+              {moreFilters ? "Menos opciones" : "Más opciones"}
             </button>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <Select
-              label="Versión / motor"
-              value={version}
-              onChange={setVersion}
-              options={versionsForModel}
-              placeholder="Cualquiera"
-            />
-            <Select
-              label="Combustible"
-              value={fuel}
-              onChange={setFuel}
-              options={localFacets.fuels || []}
-              placeholder="Cualquiera"
-            />
-            <Select
-              label="Transmisión"
-              value={transmission}
-              onChange={setTransmission}
-              options={localFacets.transmissions || []}
-              placeholder="Cualquiera"
-            />
-          </div>
-          <div>
-            <div className="mb-2 text-xs text-slate-400">Estado del auto (ajusta la tasación)</div>
-            <RuleToggles rules={rules} onChange={setRules} />
-          </div>
+          {moreFilters ? (
+            <div className="space-y-3 rounded-2xl border border-white/10 p-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Select
+                  label="Marca"
+                  value={brand}
+                  onChange={(v) => {
+                    setBrand(v);
+                    setModel("");
+                    setText(v);
+                  }}
+                  options={localFacets.brands || []}
+                  placeholder="Cualquiera"
+                />
+                <Select
+                  label="Modelo"
+                  value={model}
+                  onChange={(v) => {
+                    setModel(v);
+                    setText([brand, v].filter(Boolean).join(" "));
+                  }}
+                  options={modelsForBrand}
+                  placeholder="Cualquiera"
+                />
+                <Field label="Año" value={year} onChange={setYear} placeholder="2015" />
+                <Select
+                  label="Tipo"
+                  value={kind}
+                  onChange={(v) => {
+                    setKind(v);
+                    setBrand("");
+                    setModel("");
+                    setReport(null);
+                    setError("");
+                  }}
+                  options={[
+                    { value: "livianos", label: "Autos y SUV" },
+                    { value: "moto", label: "Motos" },
+                    { value: "camion", label: "Camiones" },
+                    { value: "all", label: "Todo el inventario" },
+                  ]}
+                  allowEmpty={false}
+                />
+              </div>
+              <RuleToggles rules={rules} onChange={setRules} />
+            </div>
+          ) : null}
         </form>
-
-        <PortalChips query={{ brand, model, year }} />
-
-        {!report && popular.length ? (
-          <div className="mt-5 flex flex-wrap gap-2">
-            <span className="text-xs text-slate-500">Búsquedas frecuentes:</span>
-            {popular.slice(0, 8).map((s) => (
-              <button
-                key={`${s.brand}-${s.model}`}
-                type="button"
-                onClick={() => pickSuggestion(s)}
-                className="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-300 hover:border-amber-400/40 hover:text-white"
-              >
-                {s.brand} {s.model}
-              </button>
-            ))}
-          </div>
-        ) : null}
       </section>
 
-      {error ? <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div> : null}
+      {error && !report ? <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div> : null}
+
+      {report && !report.stats ? (
+        <div className="space-y-3">
+          <ValuationPanel compact valuation={liveValuation} generation={generation} />
+          {error ? <p className="text-sm text-slate-400">{error}</p> : null}
+          {otherYears.length ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-slate-400">Hay avisos de {report.query.brand} {report.query.model} en:</span>
+              {otherYears.map(([y, n]) => (
+                <button
+                  key={y}
+                  type="button"
+                  onClick={() => {
+                    const next = `${report.query.brand} ${report.query.model} ${y}`;
+                    setText(next);
+                    setYear(String(y));
+                    runSearch({ q: next, brand: report.query.brand, model: report.query.model, year: y });
+                  }}
+                  className="rounded-full border border-white/15 px-3 py-1 text-xs text-slate-200 hover:border-amber-400/50"
+                >
+                  {y} · {n}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {report?.stats ? (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <div>
             <h2 className="text-2xl font-semibold">{report.label}</h2>
             <p className="text-sm text-slate-400">
-              {num.format(report.sample)} avisos · {report.scope}
+              {num.format(report.sample)} avisos del mismo modelo y año
             </p>
-            {report.insight ? (
-              <p className="mt-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
-                {report.insight}
-              </p>
-            ) : null}
-            {report.sample < 8 ? (
-              <p className="mt-2 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
-                Muestra chica ({report.sample} avisos): toma la banda de precio con reserva.
-              </p>
-            ) : null}
           </div>
 
-          <ValuationPanel valuation={liveValuation} generation={generation || report.generation} />
+          <section className="grid gap-3 sm:grid-cols-2">
+            <ExtremeCard title="Más barato hoy" row={report.cheapest} tone="text-emerald-300" />
+            <ExtremeCard title="Más caro hoy" row={report.expensive} tone="text-rose-300" />
+          </section>
 
-          {report.recommendations?.length ? (
-            <section>
-              <h3 className="mb-3 text-sm font-semibold">Recomendación de compra</h3>
-              <div className="grid gap-3 lg:grid-cols-2">
-                {report.recommendations.slice(0, 2).map((row) => (
-                  <button
-                    key={row.id}
-                    type="button"
-                    onClick={() => onOpen(row)}
-                    className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-left hover:border-emerald-400/50"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-xs uppercase tracking-wide text-emerald-300">Mejor trato vs su año</div>
-                        <div className="mt-1 text-lg font-semibold text-white">
-                          {row.year} {row.brand} {row.model}
-                        </div>
-                        <p className="mt-1 text-xs text-slate-300">{row.reason || (row.reasons || []).join(" · ")}</p>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-mono text-xl font-semibold text-emerald-300">{clp.format(row.price)}</div>
-                        {row.delta_pct != null ? (
-                          <div className="text-xs text-emerald-200">{row.delta_pct}% vs mediana</div>
-                        ) : null}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
+          <ValuationPanel compact valuation={liveValuation} generation={generation || report.generation} />
+
+          {liveValuation?.retail ? (
+            <section className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
+              <div className="font-semibold text-white">Cómo se calcula</div>
+              <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-slate-400">
+                <li>Solo avisos de la misma marca, mismo modelo y mismo año. No se mezclan otros autos.</li>
+                <li>El precio de publicar es la mediana de esos avisos (la mitad está más barata, la mitad más cara).</li>
+                <li>La retoma / compra es el tramo bajo (percentil 25), para no pagar el ask de vitrina.</li>
+                <li>El techo de riesgo es un tope: no conviene pasar de ahí.</li>
+                <li>El cierre estimado resta ~6% al publicar: el precio pedido no es el de transferencia.</li>
+              </ol>
             </section>
           ) : null}
 
-          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat
-              label={`Más barato ${report.peer_year ? report.peer_year : ""}`}
-              value={report.stats?.min ? clp.format(report.stats.min) : "—"}
-              hint={report.cheapest ? `${report.peer_n || report.sample} pares del mismo año · ${report.cheapest.city || report.cheapest.region || "Chile"}` : ""}
-            />
-            <Stat
-              label="Retoma / compra"
-              value={liveValuation?.buy ? clp.format(liveValuation.buy) : report.suggested_buy ? clp.format(report.suggested_buy) : "—"}
-              hint="Techo para comprar, no el ask publicado"
-            />
-            <Stat
-              label="Publicar (retail)"
-              value={liveValuation?.retail ? clp.format(liveValuation.retail) : report.stats?.p50 ? clp.format(report.stats.p50) : "—"}
-              hint="Mediana de pares + km y reglas"
-            />
-            <Stat
-              label={`Más caro ${report.peer_year ? report.peer_year : ""}`}
-              value={report.stats?.max ? clp.format(report.stats.max) : "—"}
-              hint={report.expensive ? `${report.peer_n || report.sample} pares del mismo año · ${report.expensive.city || report.expensive.region || "Chile"}` : ""}
-            />
-          </section>
+          <button
+            type="button"
+            onClick={() => setShowAvisos((v) => !v)}
+            className="text-sm text-amber-300 hover:text-amber-200"
+          >
+            {showAvisos ? "Ocultar avisos y gráficos" : "Ver avisos y gráficos"}
+          </button>
 
-          <section className="grid gap-3 lg:grid-cols-2">
-            <ExtremeCard
-              title={report.peer_year ? `Más barato del año ${report.peer_year}` : "El más barato del mismo recorte"}
-              row={report.cheapest}
-              tone="text-emerald-300"
-            />
-            <ExtremeCard
-              title={report.peer_year ? `Más caro del año ${report.peer_year}` : "El más caro del mismo recorte"}
-              row={report.expensive}
-              tone="text-rose-300"
-            />
-          </section>
-
+          {showAvisos ? (
+          <div className="space-y-4">
           <section className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
             Banda de mercado (P25–P50–P75): {clp.format(report.band.low)} — {clp.format(report.band.mid)} — {clp.format(report.band.high)}
             {liveValuation?.retail ? ` · Publicar cerca de ${clp.format(liveValuation.retail)}` : report.suggested_list ? ` · Si publicas, cerca de ${clp.format(report.suggested_list)}` : ""}
@@ -591,24 +541,9 @@ function SearchHome({ facets, catalog, onOpen }) {
               ))}
             </div>
           </section>
-        </div>
-      ) : null}
-
-      {!report && liveOpps.length ? (
-        <section>
-          <h3 className="mb-1 text-sm font-semibold">Oportunidades únicas ahora</h3>
-          <p className="mb-3 text-xs text-slate-400">
-            Calculadas al instante contra el mismo modelo y año. Escribe un auto arriba para profundizar.
-          </p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {liveOpps.map((row) => (
-              <div key={row.id} className="space-y-2">
-                <Card row={row} onOpen={onOpen} />
-                {row.reason ? <p className="px-1 text-[11px] text-slate-400">{row.reason}</p> : null}
-              </div>
-            ))}
           </div>
-        </section>
+          ) : null}
+        </div>
       ) : null}
 
       {!report && !catalog?.length ? (

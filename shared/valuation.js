@@ -1,6 +1,6 @@
 /** Motor de tasación: tres precios, km, versión, reglas y confianza. Usa avisos propios. */
 
-import { matchesKind } from "./cleanListing.js";
+import { matchesKind, sameBrand, sameModel } from "./cleanListing.js";
 
 function fold(value) {
   return String(value || "")
@@ -84,19 +84,11 @@ export function versionOverlap(a, b) {
 }
 
 function brandOk(row, brand) {
-  if (!brand) return true;
-  return fold(row.brand) === fold(brand);
+  return sameBrand(row.brand, brand);
 }
 
 function modelOk(row, model) {
-  if (!model) return true;
-  const want = fold(model);
-  const have = fold(row.model);
-  const title = fold(row.title);
-  if (!want) return true;
-  if (have === want || title.includes(want)) return true;
-  if (have.startsWith(want) || (want.startsWith(have) && have.length >= 3)) return true;
-  return want.split(" ").every((t) => t.length < 2 || have.includes(t) || title.includes(t));
+  return sameModel(row.model, model);
 }
 
 export function kmRegression(rows) {
@@ -129,8 +121,6 @@ export function selectComps(rows, query = {}) {
   const brand = query.brand || "";
   const model = query.model || "";
   const year = query.year ? Number(query.year) : null;
-  const yearMin = query.yearMin ? Number(query.yearMin) : null;
-  const yearMax = query.yearMax ? Number(query.yearMax) : null;
   const wanted = versionTokens({
     version: query.version,
     fuel: query.fuel,
@@ -139,10 +129,20 @@ export function selectComps(rows, query = {}) {
     queryVersion: query.version,
   });
 
-  let pool = (rows || []).filter((r) => r.price > 0 && brandOk(r, brand) && modelOk(r, model));
+  if (!brand || !model || !Number.isFinite(year)) {
+    return { rows: [], scope: "sin pares: falta marca, modelo o año", yearExact: false, versionMatched: false };
+  }
+
+  let pool = (rows || []).filter(
+    (r) => r.price > 0 && r.year === year && brandOk(r, brand) && modelOk(r, model)
+  );
   if (query.kind && query.kind !== "all") pool = pool.filter((r) => matchesKind(r, query.kind));
   if (query.category) pool = pool.filter((r) => r.category === query.category);
-  if (query.fuel) pool = pool.filter((r) => fold(r.fuel).includes(fold(query.fuel)) || versionTokens(r).has(fold(query.fuel) === "diesel" ? "diesel" : fold(query.fuel)));
+  if (query.fuel) {
+    pool = pool.filter(
+      (r) => fold(r.fuel).includes(fold(query.fuel)) || versionTokens(r).has(fold(query.fuel) === "diesel" ? "diesel" : fold(query.fuel))
+    );
+  }
   if (query.transmission) {
     const at = /auto/i.test(query.transmission);
     pool = pool.filter((r) => {
@@ -151,44 +151,26 @@ export function selectComps(rows, query = {}) {
     });
   }
 
-  const layers = [];
-  if (year) {
-    const exact = pool.filter((r) => r.year === year);
-    layers.push({ rows: exact, scope: `año ${year}`, yearExact: true });
-    layers.push({ rows: pool.filter((r) => r.year && Math.abs(r.year - year) <= 1), scope: `año ${year} ± 1`, yearExact: false });
-  } else if (yearMin || yearMax) {
-    const lo = yearMin || 1990;
-    const hi = yearMax || 2027;
-    layers.push({ rows: pool.filter((r) => r.year >= lo && r.year <= hi), scope: `años ${lo}–${hi}`, yearExact: false });
+  if (wanted.size && pool.length >= 2) {
+    const scored = pool
+      .map((r) => ({ r, ov: versionOverlap(wanted, versionTokens(r)) }))
+      .filter((x) => x.ov >= 0.25);
+    if (scored.length >= 2) {
+      return {
+        rows: scored.sort((a, b) => b.ov - a.ov).slice(0, 80).map((x) => x.r),
+        scope: `${brand} ${model} ${year} · versión`,
+        yearExact: true,
+        versionMatched: true,
+      };
+    }
   }
-  layers.push({ rows: pool, scope: model || brand ? "todos los años del modelo" : "marca", yearExact: false });
 
-  let chosen = { rows: [], scope: "sin pares", yearExact: false, versionMatched: false };
-  for (const layer of layers) {
-    if (layer.rows.length < 3) continue;
-    if (wanted.size) {
-      const scored = layer.rows
-        .map((r) => ({ r, ov: versionOverlap(wanted, versionTokens(r)) }))
-        .filter((x) => x.ov >= 0.25);
-      if (scored.length >= 3) {
-        chosen = {
-          rows: scored.sort((a, b) => b.ov - a.ov).slice(0, 80).map((x) => x.r),
-          scope: `${layer.scope} · versión`,
-          yearExact: layer.yearExact,
-          versionMatched: true,
-        };
-        break;
-      }
-    }
-    if (layer.rows.length >= 3) {
-      chosen = { ...layer, versionMatched: false };
-      break;
-    }
-  }
-  if (!chosen.rows.length && pool.length) {
-    chosen = { rows: pool.slice(0, 80), scope: "muestra amplia (pocos pares)", yearExact: false, versionMatched: false };
-  }
-  return chosen;
+  return {
+    rows: pool.slice(0, 80),
+    scope: pool.length ? `${brand} ${model} ${year}` : `sin pares de ${brand} ${model} ${year}`,
+    yearExact: true,
+    versionMatched: false,
+  };
 }
 
 function confidenceOf({ n, stats, yearExact, versionMatched, scope }) {
@@ -250,13 +232,31 @@ function applyRules(price, rules = {}) {
 const ASK_TO_CLOSE = 0.94;
 
 export function valueVehicle(allRows, query = {}) {
+  const brand = query.brand || "";
+  const model = query.model || "";
+  const year = query.year ? Number(query.year) : null;
+  const need = [];
+  if (!brand) need.push("marca");
+  if (!model) need.push("modelo");
+  if (!Number.isFinite(year)) need.push("año");
+  if (need.length) {
+    return {
+      sample: 0,
+      confidence: { level: "baja", score: 0, n: 0, iqr_pct: null, notes: ["Faltan datos para tasar"] },
+      message: `Para tasar se compara solo el mismo auto: indica ${need.join(", ")}.`,
+      disclaimer: "Precio pedido en portales, no precio de transferencia.",
+    };
+  }
+
   const picked = selectComps(allRows, query);
   const comps = picked.rows;
   const stats = summarizePrices(comps.map((r) => r.price));
   if (!stats) {
     return {
       sample: 0,
-      confidence: { level: "baja", score: 0, n: 0, iqr_pct: null, notes: ["Sin comparables"] },
+      confidence: { level: "baja", score: 0, n: 0, iqr_pct: null, notes: ["Sin comparables del mismo modelo y año"] },
+      message: `No hay avisos de ${brand} ${model} ${year} para tasar. No mezclamos otros modelos ni otros años.`,
+      scope: picked.scope,
       disclaimer: "Precio pedido en portales, no precio de transferencia.",
     };
   }

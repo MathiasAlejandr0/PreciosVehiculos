@@ -1,4 +1,4 @@
-import { sanitizePrice, sanitizeListing, isJunkBrand, priceAllowed } from "../shared/cleanListing.js";
+import { sanitizePrice, sanitizeListing, isJunkBrand, priceAllowed, sameModel } from "../shared/cleanListing.js";
 import { parseLocation } from "../server/lib/geo.js";
 import { parsePrice } from "../server/lib/parse.js";
 
@@ -19,6 +19,9 @@ ok("bio-bio", parseLocation("Bío-Bío").region, "Biobío");
 ok("ml slug region", parseLocation("santiago-metropolitana").region, "Metropolitana de Santiago");
 ok("price floor auto", priceAllowed(500000, "auto"), false);
 ok("price floor liviano", priceAllowed(800000, "auto"), true);
+ok("cx-5 same", sameModel("CX-5", "cx 5"), true);
+ok("tiggo not tiggo 8", sameModel("Tiggo", "Tiggo 8"), false);
+ok("corolla not cross", sameModel("Corolla", "Corolla Cross"), false);
 ok("junk cuatrimoto", isJunkBrand("Cuatrimoto"), true);
 ok("toyota ok", isJunkBrand("Toyota"), false);
 ok("year 2028", sanitizeListing({ brand: "Toyota", model: "Yaris", price: 8000000, year: 2028, category: "auto" })?.year, null);

@@ -28,6 +28,21 @@ function fold(value) {
     .trim();
 }
 
+export function sameBrand(a, b) {
+  const x = fold(a);
+  const y = fold(b);
+  return Boolean(x && y && x === y);
+}
+
+/** Mismo modelo canónico: "CX-5" = "cx 5". No acepta prefijos (Tiggo ≠ Tiggo 8). */
+export function sameModel(a, b) {
+  const x = fold(a);
+  const y = fold(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return x.replace(/\s+/g, "") === y.replace(/\s+/g, "");
+}
+
 export function isJunkBrand(brand) {
   const f = fold(brand);
   if (!f) return true;
